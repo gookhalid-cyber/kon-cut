@@ -489,9 +489,32 @@ function applyMask(key) {
 }
 
 const maskImgs = new Map();
+const maskAlphaCanvases = new Map();
+
 function getMaskImg(key) {
   if (!maskImgs.has(key)) { const im = new Image(); im.src = `../assets/masks/${key}.png`; maskImgs.set(key, im); }
   return maskImgs.get(key);
+}
+
+// Mask PNGs are grayscale (white shape / black background) for FFmpeg.
+// Canvas compositing needs that luminance converted into an alpha channel.
+function getMaskAlpha(key) {
+  if (maskAlphaCanvases.has(key)) return maskAlphaCanvases.get(key);
+  const im = getMaskImg(key);
+  if (!im.complete || !im.naturalWidth) return null;
+  const c = document.createElement('canvas');
+  c.width = im.naturalWidth; c.height = im.naturalHeight;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(im, 0, 0);
+  const data = cx.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < data.data.length; i += 4) {
+    const luminance = data.data[i];
+    data.data[i] = 255; data.data[i + 1] = 255; data.data[i + 2] = 255;
+    data.data[i + 3] = luminance;
+  }
+  cx.putImageData(data, 0, 0);
+  maskAlphaCanvases.set(key, c);
+  return c;
 }
 
 function toast(msg) {
@@ -1174,8 +1197,8 @@ function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode,
   fxCtx.clearRect(0, 0, W, H);
   drawTransformed(fxCtx, source, W, H, { ...k, opacity: 1 }, filter);
   if (maskKey) {
-    const im = getMaskImg(maskKey);
-    if (im.complete && im.naturalWidth) {
+    const im = getMaskAlpha(maskKey);
+    if (im) {
       const mk = { ...MASK_KF_DEFAULT, ...k };
       const cx = W / 2 + ((mk.maskX ?? 0.5) - 0.5) * W;
       const cy = H / 2 + ((mk.maskY ?? 0.5) - 0.5) * H;
