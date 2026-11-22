@@ -517,6 +517,189 @@ function getMaskAlpha(key) {
   return c;
 }
 
+const maskTintCanvases = new Map();
+function getMaskTint(key) {
+  if (maskTintCanvases.has(key)) return maskTintCanvases.get(key);
+  const src = getMaskAlpha(key);
+  if (!src) return null;
+  const c = document.createElement('canvas');
+  c.width = src.width; c.height = src.height;
+  const cx = c.getContext('2d');
+  cx.drawImage(src, 0, 0);
+  cx.globalCompositeOperation = 'source-in';
+  cx.fillStyle = '#5ab6ff';
+  cx.fillRect(0, 0, c.width, c.height);
+  maskTintCanvases.set(key, c);
+  return c;
+}
+
+function maskGeometryAt(c, t, W, H) {
+  const k = evalKfs(c, t);
+  const mk = { ...MASK_KF_DEFAULT, ...k };
+  const open = clamp(mk.maskOpen ?? 1, 0, 1);
+  const scale = clamp(mk.maskScale ?? 1, 0.1, 3);
+  const drawn = scale * open;
+  return {
+    cx: W / 2 + ((mk.maskX ?? 0.5) - 0.5) * W,
+    cy: H / 2 + ((mk.maskY ?? 0.5) - 0.5) * H,
+    rot: (mk.maskRotation || 0) * Math.PI / 180,
+    mk, scale, open, drawn,
+    w: W * drawn, h: H * drawn,
+  };
+}
+
+let maskOverlayHandles = null;
+let maskDrag = null;
+
+function drawMaskOverlay(ctx, W, H, t) {
+  maskOverlayHandles = null;
+  if (!state.selected || state.hoverMask) return;
+  const c = findClip(state.selected.trackId, state.selected.clipId);
+  if (!c || c.type !== 'media' || c.mediaKind === 'audio') return;
+  const track = getTrack(state.selected.trackId);
+  if (!track || track.hidden || track.kind !== 'video') return;
+  if (t < c.start || t >= c.start + c.duration) return;
+  const shape = discreteAt(c, t, 'maskShape', c.mask);
+  if (!shape) return;
+
+  const g = maskGeometryAt(c, t, W, H);
+  const cos = Math.cos(g.rot), sin = Math.sin(g.rot);
+  const rp = (lx, ly) => ({ x: g.cx + lx * cos - ly * sin, y: g.cy + lx * sin + ly * cos });
+  const tint = getMaskTint(shape);
+  ctx.save();
+  if (tint) {
+    ctx.globalAlpha = 0.16;
+    ctx.translate(g.cx, g.cy); ctx.rotate(g.rot);
+    ctx.drawImage(tint, -g.w / 2, -g.h / 2, g.w, g.h);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+  ctx.strokeStyle = 'rgba(90,182,255,0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  const corners = [rp(-g.w / 2, -g.h / 2), rp(g.w / 2, -g.h / 2), rp(g.w / 2, g.h / 2), rp(-g.w / 2, g.h / 2)];
+  ctx.beginPath();
+  corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath(); ctx.stroke();
+  ctx.setLineDash([]);
+  const top = rp(0, -g.h / 2);
+  const rotate = rp(0, -g.h / 2 - 28);
+  ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(rotate.x, rotate.y); ctx.stroke();
+
+  const handles = {
+    move: { x: g.cx, y: g.cy, color: '#ffd75e' },
+    scale: { ...rp(g.w / 2, 0), color: '#5ab6ff' },
+    rotate: { ...rotate, color: '#7bffc0' },
+    open: { ...rp(0, g.h / 2), color: '#ff8fa3' },
+  };
+  Object.entries(handles).forEach(([name, h]) => {
+    ctx.fillStyle = h.color; ctx.strokeStyle = '#0e1015'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(h.x, h.y, name === 'move' ? 7 : 6, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+  });
+  maskOverlayHandles = handles;
+
+  ctx.font = '700 12px Cairo, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 8;
+  ctx.fillText('اسحب المقابض لتعديل الماسك', W / 2, 14);
+  ctx.restore();
+}
+
+function previewPoint(e) {
+  const canvas = $('preview');
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * canvas.width / Math.max(1, r.width),
+    y: (e.clientY - r.top) * canvas.height / Math.max(1, r.height),
+  };
+}
+
+function hitMaskHandle(p) {
+  if (!maskOverlayHandles) return null;
+  for (const [name, h] of Object.entries(maskOverlayHandles)) {
+    if (Math.hypot(p.x - h.x, p.y - h.y) <= 14) return name;
+  }
+  return null;
+}
+
+function syncMaskInputs(c) {
+  const values = {
+    mx: c.maskX, my: c.maskY, mrot: c.maskRotation,
+    msc: c.maskScale, mopen: c.maskOpen, mfeather: c.maskFeather,
+  };
+  Object.entries(values).forEach(([id, v]) => {
+    const input = $('m_' + id);
+    if (input && document.activeElement !== input) input.value = v;
+    const label = $('kv_m_' + id);
+    if (label && v != null) label.textContent = Number(v).toFixed(2);
+  });
+}
+
+function onPreviewPointerDown(e) {
+  if (e.button !== 0 || !state.selected) return;
+  const handle = hitMaskHandle(previewPoint(e));
+  if (!handle) return;
+  const c = findClip(state.selected.trackId, state.selected.clipId);
+  if (!c) return;
+  const W = $('preview').width, H = $('preview').height;
+  const g = maskGeometryAt(c, state.time, W, H);
+  maskDrag = {
+    handle, clipId: c.id, start: previewPoint(e), g,
+    startVals: {
+      x: g.mk.maskX ?? 0.5, y: g.mk.maskY ?? 0.5,
+      scale: g.scale, open: g.open, rotation: g.mk.maskRotation || 0,
+    },
+  };
+  e.preventDefault(); e.stopPropagation();
+  try { $('preview').setPointerCapture?.(e.pointerId); } catch (err) { /* synthetic events */ }
+  $('preview').style.cursor = 'grabbing';
+}
+
+function onPreviewPointerMove(e) {
+  const p = previewPoint(e);
+  if (!maskDrag) {
+    $('preview').style.cursor = hitMaskHandle(p) ? 'grab' : 'default';
+    return;
+  }
+  const c = findClip(state.selected.trackId, state.selected.clipId);
+  if (!c || c.id !== maskDrag.clipId) return;
+  const W = $('preview').width, H = $('preview').height;
+  const g = maskDrag.g, s = maskDrag.startVals;
+  const dx = p.x - maskDrag.start.x, dy = p.y - maskDrag.start.y;
+  if (maskDrag.handle === 'move') {
+    setMaskValue(c, 'maskX', clamp(s.x + dx / W, 0, 1));
+    setMaskValue(c, 'maskY', clamp(s.y + dy / H, 0, 1));
+  } else if (maskDrag.handle === 'scale') {
+    const cos = Math.cos(g.rot), sin = Math.sin(g.rot);
+    const lx = (p.x - g.cx) * cos + (p.y - g.cy) * sin;
+    const sx = (maskDrag.start.x - g.cx) * cos + (maskDrag.start.y - g.cy) * sin;
+    const factor = clamp(lx / Math.max(1, sx), 0.1, 3);
+    const drawn = clamp(g.drawn * factor, 0.1, 3);
+    setMaskValue(c, 'maskScale', clamp(drawn / Math.max(0.05, g.open), 0.1, 3));
+  } else if (maskDrag.handle === 'rotate') {
+    let deg = Math.atan2(p.y - g.cy, p.x - g.cx) * 180 / Math.PI + 90;
+    deg = ((deg + 180) % 360 + 360) % 360 - 180;
+    setMaskValue(c, 'maskRotation', Math.round(deg));
+  } else if (maskDrag.handle === 'open') {
+    const cos = Math.cos(g.rot), sin = Math.sin(g.rot);
+    const ly = -(p.x - g.cx) * sin + (p.y - g.cy) * cos;
+    const drawn = clamp(2 * ly / H, 0.1, 3);
+    setMaskValue(c, 'maskOpen', clamp(drawn / Math.max(0.05, g.scale), 0, 1));
+  }
+  syncMaskInputs(c);
+  drawPreview();
+  e.preventDefault();
+}
+
+function onPreviewPointerUp() {
+  if (!maskDrag) return;
+  maskDrag = null;
+  $('preview').style.cursor = 'default';
+  renderAll();
+}
+
 function toast(msg) {
   const el = $('toast'); el.textContent = msg; el.classList.add('show');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 2300);
@@ -1331,6 +1514,8 @@ function drawPreview() {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.shadowColor = '#000'; ctx.shadowBlur = 10;
     ctx.fillText('◑  ' + (p ? p.name : ''), W / 2, H - 42); ctx.restore();
   }
+
+  drawMaskOverlay(ctx, W, H, t);
 }
 
 /* ---------- playback ---------- */
@@ -1395,6 +1580,11 @@ $('mirrorBtn').addEventListener('click', () => toggleMirror('h'));
 $('reverseBtn').addEventListener('click', reverseSelected);
 $('segGeneralBtn').addEventListener('click', () => applySegmentation('general'));
 $('segPersonBtn').addEventListener('click', () => applySegmentation('person'));
+
+$('preview').addEventListener('pointerdown', onPreviewPointerDown);
+window.addEventListener('pointermove', onPreviewPointerMove);
+window.addEventListener('pointerup', onPreviewPointerUp);
+window.addEventListener('pointercancel', onPreviewPointerUp);
 
 const ctxMenu = $('ctxMenu');
 function showCtxMenu(e) {
@@ -1471,16 +1661,24 @@ window.api.onSegmentProgress((p) => {
   const st = $('segStatus'); if (st) st.textContent = `جاري العزل... ${percent}%`;
 });
 
+function isTypingTarget(el) {
+  if (!el) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  if (el.tagName !== 'INPUT') return false;
+  return !['range', 'checkbox', 'radio', 'color', 'button'].includes(el.type);
+}
+
 document.addEventListener('keydown', (e) => {
-  const tag = document.activeElement?.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (isTypingTarget(document.activeElement)) return;
+  const mod = e.ctrlKey || e.metaKey || e.altKey;
+  if (e.ctrlKey && e.code === 'KeyS') { e.preventDefault(); $('saveBtn').click(); return; }
+  if (mod) return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
-  if (e.key.toLowerCase() === 's' && !e.ctrlKey) splitSelected();
-  if (e.key.toLowerCase() === 'f' && !e.ctrlKey) freezeFrame();
-  if (e.key.toLowerCase() === 'm' && !e.ctrlKey) toggleMirror('h');
-  if (e.key.toLowerCase() === 'r' && !e.ctrlKey) reverseSelected();
-  if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); $('saveBtn').click(); }
+  if (e.code === 'KeyS') { e.preventDefault(); splitSelected(); }
+  if (e.code === 'KeyF') freezeFrame();
+  if (e.code === 'KeyM') toggleMirror('h');
+  if (e.code === 'KeyR') reverseSelected();
 });
 
 /* init */
