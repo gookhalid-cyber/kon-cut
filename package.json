@@ -1,0 +1,13 @@
+{
+  "name": "kon-cut",
+  "version": "0.2.0",
+  "description": "Kon Cut - original desktop video editor inspired by the best open-source editors",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test:export": "node test-export.js"
+  },
+  "devDependencies": {
+    "electron": "^40.0.0"
+  }
+}

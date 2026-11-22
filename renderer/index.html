@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>Kon Cut</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="titlebar">
+  <div class="brand">
+    <span class="brand-mark">M</span>
+    <span class="brand-name">Kon Cut</span>
+    <span class="badge">Studio</span>
+  </div>
+  <div class="project-title" id="projectTitle">مشروع جديد <span>· 16:9 · 30fps</span></div>
+  <div class="top-actions">
+    <button class="btn btn-import" id="importBtn">＋ استيراد</button>
+    <button class="btn btn-plain" id="saveBtn">حفظ</button>
+    <button class="btn btn-plain" id="openBtn">فتح</button>
+    <button class="btn btn-plain" id="newBtn">جديد</button>
+    <button class="btn btn-export" id="exportBtn">تصدير</button>
+  </div>
+</header>
+
+<div class="main-body">
+
+  <!-- left rail + panel -->
+  <nav class="rail" id="rail">
+    <button class="rail-btn active" data-tab="media"><span class="ri">▣</span><small>وسائط</small></button>
+    <button class="rail-btn" data-tab="audio"><span class="ri">♫</span><small>صوت</small></button>
+    <button class="rail-btn" data-tab="text"><span class="ri">T</span><small>نص</small></button>
+    <button class="rail-btn" data-tab="transitions"><span class="ri">◈</span><small>انتقالات</small></button>
+    <button class="rail-btn" data-tab="effects"><span class="ri">✦</span><small>تأثيرات</small></button>
+    <button class="rail-btn" data-tab="filters"><span class="ri">◐</span><small>فلاتر</small></button>
+    <button class="rail-btn" data-tab="masks"><span class="ri">⬭</span><small>ماسكات</small></button>
+    <button class="rail-btn" data-tab="adjust"><span class="ri">☷</span><small>ضبط</small></button>
+  </nav>
+
+  <aside class="side-panel">
+    <div class="panel-head">
+      <h2 id="panelTitle">الوسائط</h2>
+      <button class="icon-btn" id="importBtnSide" title="استيراد">＋</button>
+    </div>
+
+    <div class="tab-content" id="tab-media">
+      <div class="media-grid" id="mediaGrid"></div>
+      <div class="hint" id="mediaHint">اسحب الملف للخط الزمني أو اضغط عليه لإضافته عند رأس التشغيل</div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-audio">
+      <div class="hint top-hint">مكتبة الصوت — استيراد ملفات MP3 / WAV</div>
+      <div class="media-grid" id="audioGrid"></div>
+      <div class="section-label">مؤثرات صوتية — مرّر للاستماع أو اضغط للإضافة</div>
+      <div class="preset-grid" id="sfxList"></div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-text">
+      <button class="wide-btn" id="addTextBtn">＋ إضافة نص عادي</button>
+      <div class="section-label">قوالب نصية جاهزة</div>
+      <div class="preset-grid" id="textPresets"></div>
+      <div class="section-label">نصوص على الخط الزمني</div>
+      <div class="text-list" id="textList"></div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-transitions">
+      <div class="section-label">انتقالات — اسحبها بين مقطعين أو اضغط لإضافتها عند رأس التشغيل</div>
+      <div class="preset-grid" id="transitionPresets"></div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-effects">
+      <div class="section-label">تأثيرات بصرية</div>
+      <div class="preset-grid" id="effectPresets"></div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-filters">
+      <div class="section-label">فلاتر ألوان</div>
+      <div class="preset-grid" id="filterPresets"></div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-masks">
+      <div class="section-label">ماسكات — مرّر للمعاينة، واضغط لتطبيقها على المقطع المحدد</div>
+      <div class="preset-grid" id="maskPresets"></div>
+      <div class="hint">الماسك بيطبّق على المقطع المختار في الخط الزمني. تقدر تغيّر حجمه من تبويب «أساسي» في لوحة الخصائص.</div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-adjust">
+      <div class="section-label">ضبط الصورة</div>
+      <div class="adjust-list">
+        <label>السطوع <input type="range" id="adjBright" min="-100" max="100" value="0" /></label>
+        <label>التباين <input type="range" id="adjContrast" min="-100" max="100" value="0" /></label>
+        <label>التشبع <input type="range" id="adjSat" min="-100" max="100" value="0" /></label>
+        <label>الحرارة <input type="range" id="adjTemp" min="-100" max="100" value="0" /></label>
+      </div>
+      <div class="hint">الضبط هيطبّق على التصدير في المرحلة القادمة</div>
+    </div>
+  </aside>
+
+  <!-- center viewer -->
+  <main class="stage">
+    <div class="viewer-wrap">
+      <div class="viewer">
+        <canvas id="preview" width="960" height="540"></canvas>
+        <div class="preview-empty" id="previewEmpty">استراد فيديو أو صورة للبداية</div>
+      </div>
+      <div class="player-bar">
+        <button class="pbtn" id="playBtn" title="تشغيل">▶</button>
+        <button class="pbtn small" id="stopBtn" title="إيقاف">■</button>
+        <span class="time" id="curTime">00:00:00.00</span>
+        <input type="range" id="seek" min="0" max="100" value="0" step="0.01" />
+        <span class="time dim" id="totalTime">00:00:00.00</span>
+        <select id="ratioSel" class="mini-select" title="نسبة الأبعاد">
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+          <option value="1:1">1:1</option>
+        </select>
+        <button class="pbtn small" id="fullscreenBtn" title="ملء الشاشة">⛶</button>
+      </div>
+    </div>
+    <div class="shortcuts">
+      <span><kbd>Space</kbd> تشغيل</span><span><kbd>S</kbd> تقسيم</span>
+      <span><kbd>Del</kbd> حذف</span><span><kbd>Ctrl+S</kbd> حفظ</span>
+    </div>
+  </main>
+
+  <!-- inspector -->
+  <aside class="inspector-panel">
+    <div class="inspector-tabs" id="inspectorTabs">
+      <button class="active" data-itab="basic">أساسي</button>
+      <button data-itab="motion">حركة</button>
+      <button data-itab="text">نص</button>
+    </div>
+    <div id="inspector" class="inspector">
+      <div class="empty-inspector">اختر مقطعاً من الخط الزمني لتعديل خصائصه</div>
+    </div>
+  </aside>
+</div>
+
+<!-- timeline -->
+<section class="timeline">
+  <div class="tl-toolbar">
+    <div class="tl-tools">
+      <button class="tool-btn" id="splitBtn" title="تقسيم">✂</button>
+      <button class="tool-btn danger" id="deleteBtn" title="حذف">🗑</button>
+      <span class="tool-sep"></span>
+      <button class="tool-btn" id="addVideoTrack" title="مسار فيديو">＋V</button>
+      <button class="tool-btn" id="addAudioTrack" title="مسار صوت">＋A</button>
+      <span class="tool-sep"></span>
+      <button class="tool-btn active" id="snapBtn" title="محاذاة تلقائية">⤒</button>
+      <button class="tool-btn" id="fitBtn" title="ملاءمة">⤢</button>
+    </div>
+    <span class="spacer"></span>
+    <span class="dur-label" id="projectDur">المدة: 00:00:00.00</span>
+    <label class="zoom-label">🔍 <input type="range" id="zoom" min="20" max="200" value="70" /></label>
+  </div>
+
+  <div class="timeline-scroll" id="timelineScroll">
+    <div class="timeline-inner" id="timelineInner">
+      <div class="ruler-row">
+        <div class="spacer-head"></div>
+        <div class="ruler" id="ruler"></div>
+      </div>
+      <div id="tracks"></div>
+      <div class="playhead" id="playhead"></div>
+    </div>
+  </div>
+</section>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-backdrop" id="exportModal">
+  <div class="modal">
+    <h3>جاري التصدير…</h3>
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+    <p class="progress-text" id="progressText">0%</p>
+  </div>
+</div>
+
+<input type="file" id="hiddenFile" accept="video/*,audio/*,image/*" multiple hidden />
+<script src="app.js"></script>
+</body>
+</html>
