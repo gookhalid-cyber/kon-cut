@@ -101,6 +101,111 @@ const imageEls = new Map();
 const audioNodes = new Map();
 let rafId = null, lastFrameAt = 0, toastTimer = null;
 
+/* ---------- audio engine (Fairlight-style monitoring) ---------- */
+let audioCtx = null, masterGain = null, analyser = null, vuData = null, sfxGain = null;
+const trackGains = new Map();
+let masterVolume = 1, masterMuted = false, outputDeviceId = '';
+
+function ensureAudioGraph() {
+  if (audioCtx) { if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {}); return audioCtx; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try {
+    audioCtx = new AC();
+    masterGain = audioCtx.createGain(); masterGain.gain.value = masterMuted ? 0 : masterVolume;
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 512; analyser.smoothingTimeConstant = 0.75;
+    vuData = new Uint8Array(analyser.fftSize);
+    sfxGain = audioCtx.createGain(); sfxGain.gain.value = 0.65;
+    masterGain.connect(analyser); analyser.connect(audioCtx.destination); sfxGain.connect(masterGain);
+    if (outputDeviceId && typeof audioCtx.setSinkId === 'function') {
+      audioCtx.setSinkId(outputDeviceId).catch(() => {});
+    }
+    audioCtx.resume().catch(() => {});
+  } catch (e) { audioCtx = null; }
+  return audioCtx;
+}
+
+function getTrackGain(trackId) {
+  if (!audioCtx || !masterGain) return null;
+  if (!trackGains.has(trackId)) { const g = audioCtx.createGain(); g.connect(masterGain); trackGains.set(trackId, g); }
+  return trackGains.get(trackId);
+}
+
+function connectElementToAudio(el, trackId) {
+  if (!audioCtx || el._kcConnected) return;
+  try {
+    const src = audioCtx.createMediaElementSource(el);
+    const clipGain = audioCtx.createGain();
+    clipGain.gain.value = 1;
+    src.connect(clipGain);
+    clipGain.connect(getTrackGain(trackId) || audioCtx.destination);
+    el._kcConnected = true;
+    el._kcClipGain = clipGain;
+    el.muted = false;
+    el.volume = 1;
+  } catch (e) { /* fallback: element plays directly */ }
+}
+
+function updateTrackGains() {
+  const anySolo = state.project.tracks.some((t) => t.solo);
+  state.project.tracks.forEach((t) => {
+    const g = getTrackGain(t.id); if (!g || !audioCtx) return;
+    const audible = !t.muted && (!anySolo || t.solo);
+    g.gain.setTargetAtTime(audible ? (t.volume ?? 1) : 0, audioCtx.currentTime, 0.02);
+  });
+  if (masterGain && audioCtx) masterGain.gain.setTargetAtTime(masterMuted ? 0 : masterVolume, audioCtx.currentTime, 0.02);
+}
+
+function setSinkOn(el) {
+  if (outputDeviceId && typeof el.setSinkId === 'function') el.setSinkId(outputDeviceId).catch(() => {});
+}
+
+async function applyOutputDevice(id) {
+  outputDeviceId = id || '';
+  const els = [...videoEls.values(), ...audioNodes.values()];
+  if (sfxAudio) els.push(sfxAudio);
+  for (const el of els) setSinkOn(el);
+  if (audioCtx && typeof audioCtx.setSinkId === 'function') {
+    try { await audioCtx.setSinkId(outputDeviceId || 'default'); } catch (e) { /* keep system default */ }
+  }
+}
+
+async function populateAudioDevices() {
+  const sel = $('deviceSel');
+  try {
+    const devs = await navigator.mediaDevices?.enumerateDevices?.() || [];
+    const outs = devs.filter((d) => d.kind === 'audiooutput');
+    if (!outs.length) { sel.innerHTML = '<option value="">الجهاز الافتراضي</option>'; return; }
+    const real = outs.find((d) => /speaker|output|realtek|high definition/i.test(d.label || '') && !/virtual|audioRelay/i.test(d.label || ''));
+    const good = real || outs.find((d) => d.deviceId === 'default') || outs[0];
+    sel.innerHTML = '<option value="">الجهاز الافتراضي</option>' + outs.map((d, i) =>
+      `<option value="${d.deviceId}">${escapeHtml(d.label || 'جهاز ' + (i + 1))}</option>`).join('');
+    sel.value = good.deviceId; await applyOutputDevice(good.deviceId);
+  } catch (e) { sel.innerHTML = '<option value="">الجهاز الافتراضي</option>'; }
+}
+
+function drawVuLoop() {
+  requestAnimationFrame(drawVuLoop);
+  const c = $('vuMeter'); if (!c) return;
+  const ctx = c.getContext('2d'), w = c.width, h = c.height;
+  ctx.clearRect(0, 0, w, h);
+  let level = 0;
+  if (analyser && audioCtx) {
+    analyser.getByteTimeDomainData(vuData);
+    let sum = 0;
+    for (let i = 0; i < vuData.length; i++) { const v = (vuData[i] - 128) / 128; sum += v * v; }
+    level = Math.min(1, Math.sqrt(sum / vuData.length) * 3.2);
+  } else if (state.playing) level = 0.25;
+  const bars = 18, gap = 1, bw = (w - gap * (bars - 1)) / bars;
+  for (let i = 0; i < bars; i++) {
+    ctx.fillStyle = (i / bars) >= level ? '#242430' : i > bars * 0.88 ? '#ff5f6d' : i > bars * 0.7 ? '#ffd75e' : '#38e08a';
+    ctx.fillRect(i * (bw + gap), 1, bw, h - 2);
+  }
+  const on = level > 0.015;
+  $('audioLed').classList.toggle('on', on);
+  $('audioState').textContent = masterMuted ? 'الصوت مكتوم' : on ? 'الصوت شغال' : state.playing ? 'مفيش إشارة — جرّب جهاز تاني' : 'الصوت متوقف';
+}
+
 /* ---------- model ---------- */
 function allClips() { return state.project.tracks.flatMap((t) => t.clips.map((c) => ({ ...c, _track: t }))); }
 function getTrack(id) { return state.project.tracks.find((t) => t.id === id); }
@@ -297,9 +402,14 @@ function clearHoverPreviews(el) {
 }
 
 function playSfxPreview(file) {
+  ensureAudioGraph();
   if (sfxAudio) { sfxAudio.pause(); sfxAudio.currentTime = 0; }
   sfxAudio = new Audio('../assets/sfx/' + file);
   sfxAudio.volume = 0.65;
+  setSinkOn(sfxAudio);
+  if (audioCtx && sfxGain) {
+    try { const src = audioCtx.createMediaElementSource(sfxAudio); src.connect(sfxGain); } catch (e) { /* direct fallback */ }
+  }
   sfxAudio.play().catch(() => {});
 }
 
@@ -431,18 +541,28 @@ function renderTracks() {
   state.project.tracks.forEach((track) => {
     const row = document.createElement('div'); row.className = 'track-row';
     const head = document.createElement('div'); head.className = 'track-head';
+    const vol = track.volume ?? 1;
     head.innerHTML = `<div class="track-name">${escapeHtml(track.name)}</div><div class="track-meta">${track.clips.length} مقطع</div>
+      ${track.kind !== 'text' ? `<div class="track-vol-row"><input type="range" class="track-vol" data-vol min="0" max="1.5" step="0.01" value="${vol}" title="مستوى صوت المسار" /><span class="track-vol-val">${Math.round(vol * 100)}%</span></div>` : ''}
       <div class="track-actions">
-        <button class="mini-btn" data-act="mute">${track.muted ? '🔇' : '🔈'}</button>
+        <button class="mini-btn" data-act="mute" title="كتم المسار">${track.muted ? '🔇' : '🔈'}</button>
+        <button class="mini-btn ${track.solo ? 'solo-on' : ''}" data-act="solo" title="عزل المسار (Solo)">S</button>
         <button class="mini-btn" data-act="hide">${track.hidden ? '◌' : '◉'}</button>
         <button class="mini-btn" data-act="del">✕</button>
       </div>`;
+    const volSlider = head.querySelector('[data-vol]');
+    if (volSlider) volSlider.addEventListener('input', (e) => {
+      track.volume = Number(e.target.value);
+      head.querySelector('.track-vol-val').textContent = Math.round(track.volume * 100) + '%';
+      updateTrackGains(); drawPreview();
+    });
     head.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', (e) => {
       e.stopPropagation(); const act = b.dataset.act;
       if (act === 'mute') track.muted = !track.muted;
+      if (act === 'solo') track.solo = !track.solo;
       if (act === 'hide') track.hidden = !track.hidden;
-      if (act === 'del' && state.project.tracks.length > 1) state.project.tracks = state.project.tracks.filter((t) => t.id !== track.id);
-      recomputeDuration(); renderAll();
+      if (act === 'del' && state.project.tracks.length > 1) { state.project.tracks = state.project.tracks.filter((t) => t.id !== track.id); trackGains.delete(track.id); }
+      updateTrackGains(); recomputeDuration(); renderAll();
     }));
 
     const lane = document.createElement('div'); lane.className = 'track-lane'; lane.dataset.trackId = track.id;
@@ -626,7 +746,7 @@ function refreshTimings() { recomputeDuration(); renderTracks(); renderRuler(); 
 function getVideo(src) {
   if (!videoEls.has(src)) {
     const v = document.createElement('video'); v.src = toUrl(src); v.muted = true; v.playsInline = true; v.preload = 'auto';
-    videoEls.set(src, v);
+    setSinkOn(v); videoEls.set(src, v);
   }
   return videoEls.get(src);
 }
@@ -638,15 +758,20 @@ function getImage(src) {
 function getAudioNode(c) {
   if (!audioNodes.has(c.id)) {
     const el = c.mediaKind === 'video' ? getVideo(c.src) : new Audio(toUrl(c.src));
-    if (c.mediaKind !== 'video') el.preload = 'auto';
+    if (c.mediaKind !== 'video') { el.preload = 'auto'; setSinkOn(el); }
     el.muted = true;
+    connectElementToAudio(el, c._track?.id);
     audioNodes.set(c.id, el);
   }
   return audioNodes.get(c.id);
 }
 
 function pauseAllAudio() {
-  audioNodes.forEach((el) => { el.pause(); el.muted = true; });
+  audioNodes.forEach((el) => {
+    el.pause();
+    if (el._kcClipGain && audioCtx) el._kcClipGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.01);
+    else el.muted = true;
+  });
 }
 
 function syncAudio(t, all) {
@@ -656,22 +781,30 @@ function syncAudio(t, all) {
   audioNodes.forEach((el, id) => {
     if (!activeIds.has(id)) { el.pause(); el.muted = true; }
   });
+  const anySolo = state.project.tracks.some((tr) => tr.solo);
   active.forEach((c) => {
     const el = getAudioNode(c);
+    connectElementToAudio(el, c._track?.id);
     const target = (c.inPoint || 0) + (t - c.start);
-    const shouldHear = c.hasAudio && !getTrack(c._track.id).muted;
-    el.volume = clamp(Number(c.volume ?? 1), 0, 2);
+    const tr = getTrack(c._track.id);
+    const audible = !tr.muted && (!anySolo || tr.solo);
+    const shouldHear = c.hasAudio && audible;
+    if (el._kcConnected && el._kcClipGain && audioCtx) {
+      el._kcClipGain.gain.setTargetAtTime(shouldHear ? clamp(Number(c.volume ?? 1), 0, 2) : 0, audioCtx.currentTime, 0.02);
+    } else {
+      const trVol = audioCtx ? 1 : (tr.volume ?? 1);
+      el.volume = clamp(Number(c.volume ?? 1) * trVol, 0, 2);
+      el.muted = !shouldHear || !state.playing;
+    }
     if (state.playing) {
       const drift = Math.abs(el.currentTime - target);
       if (el.paused || drift > 0.4) {
         el.currentTime = clamp(target, 0, Math.max(0, (el.duration || target + 1) - 0.05));
       }
-      el.muted = !shouldHear;
       if (el.paused) el.play().catch(() => {});
     } else {
       if (!el.paused) el.pause();
       if (Math.abs(el.currentTime - target) > 0.15) el.currentTime = target;
-      el.muted = true;
     }
   });
 }
@@ -836,6 +969,7 @@ function updatePlaybackUI() {
 function setTime(t) { state.time = clamp(t, 0, state.project.duration || 0); updatePlaybackUI(); drawPreview(); }
 function togglePlay() {
   if (state.project.duration <= 0) { toast('ما فيش محتوى للتشغيل'); return; }
+  ensureAudioGraph(); updateTrackGains();
   state.playing = !state.playing; $('playBtn').textContent = state.playing ? '❚❚' : '▶';
   if (state.playing) {
     if (state.time >= state.project.duration) state.time = 0;
@@ -865,6 +999,14 @@ $('playBtn').addEventListener('click', togglePlay);
 $('stopBtn').addEventListener('click', stopPlayback);
 $('deleteBtn').addEventListener('click', deleteSelected);
 $('splitBtn').addEventListener('click', splitSelected);
+
+$('masterVol').addEventListener('input', (e) => { masterVolume = Number(e.target.value); ensureAudioGraph(); updateTrackGains(); });
+$('muteBtn').addEventListener('click', () => {
+  masterMuted = !masterMuted; $('muteBtn').textContent = masterMuted ? '🔇' : '🔊';
+  ensureAudioGraph(); updateTrackGains();
+});
+$('deviceSel').addEventListener('change', (e) => applyOutputDevice(e.target.value));
+$('testSoundBtn').addEventListener('click', () => { ensureAudioGraph(); updateTrackGains(); playSfxPreview('ding.wav'); });
 
 $('seek').addEventListener('input', (e) => setTime(Number(e.target.value)));
 $('ruler').addEventListener('pointerdown', (e) => { const r = $('ruler').getBoundingClientRect(); setTime((e.clientX - r.left) / state.pxPerSec); });
@@ -930,3 +1072,4 @@ document.addEventListener('keydown', (e) => {
 
 /* init */
 setupTabs(); renderPresets(); recomputeDuration(); renderAll();
+populateAudioDevices(); drawVuLoop();

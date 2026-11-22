@@ -163,6 +163,16 @@ button { cursor: pointer; }
 .time.dim { color: var(--dim); }
 .player-bar input[type=range] { flex: 1; accent-color: var(--accent); }
 .mini-select { background: var(--bg3); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 3px; font-size: 10px; }
+.audio-bar {
+  width: min(100%, 860px); display: flex; align-items: center; gap: 8px;
+  background: var(--bg2); border: 1px solid var(--line); border-top: none; border-radius: 0 0 8px 8px; padding: 5px 10px;
+}
+.audio-led { width: 8px; height: 8px; border-radius: 50%; background: #4a4a55; box-shadow: 0 0 0 2px #ffffff10; flex: 0 0 8px; }
+.audio-led.on { background: #38e08a; box-shadow: 0 0 9px #38e08a; }
+.audio-state { color: var(--dim); font-size: 9px; min-width: 96px; }
+#vuMeter { width: 110px; height: 14px; background: #0d0d10; border: 1px solid var(--line); border-radius: 3px; }
+#masterVol { width: 90px; accent-color: #38e08a; }
+.audio-bar .mini-select { max-width: 180px; }
 .shortcuts { display: flex; gap: 16px; justify-content: center; padding: 7px; color: var(--dim); font-size: 9px; }
 kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--text); }
 
@@ -216,8 +226,12 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
 .tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid #34343c; }
 .tick span { position: absolute; top: 6px; left: 4px; font-size: 8px; color: var(--dim); white-space: nowrap; }
 
-.track-row { display: flex; height: 56px; border-bottom: 1px solid #242428; }
-.track-head { width: 126px; flex: 0 0 126px; height: 56px; background: var(--bg2); border-right: 1px solid var(--line); border-bottom: 1px solid #242428; padding: 5px 7px; display: flex; flex-direction: column; justify-content: center; }
+.track-row { display: flex; height: 64px; border-bottom: 1px solid #242428; }
+.track-head { width: 126px; flex: 0 0 126px; height: 64px; background: var(--bg2); border-right: 1px solid var(--line); border-bottom: 1px solid #242428; padding: 4px 7px; display: flex; flex-direction: column; justify-content: center; }
+.track-vol-row { display: flex; align-items: center; gap: 5px; margin: 2px 0; }
+.track-vol { flex: 1; width: 60px; accent-color: #38e08a; height: 12px; }
+.track-vol-val { font-size: 8px; color: var(--dim); min-width: 28px; direction: ltr; }
+.mini-btn.solo-on { color: #ffd75e; border-color: #ffd75e; background: #4a3d14; }
 .track-name { font-size: 10px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .track-meta { font-size: 8px; color: var(--dim); }
 .track-actions { display: flex; gap: 3px; margin-top: 2px; }

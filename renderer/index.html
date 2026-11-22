@@ -116,6 +116,15 @@
         </select>
         <button class="pbtn small" id="fullscreenBtn" title="ملء الشاشة">⛶</button>
       </div>
+      <div class="audio-bar">
+        <span class="audio-led" id="audioLed" title="حالة الصوت"></span>
+        <span class="audio-state" id="audioState">الصوت متوقف</span>
+        <canvas id="vuMeter" width="110" height="14" title="مستوى الصوت"></canvas>
+        <button class="mini-btn" id="testSoundBtn" title="تجربة الصوت">♬ تجربة</button>
+        <button class="mini-btn" id="muteBtn" title="كتم عام">🔊</button>
+        <input type="range" id="masterVol" min="0" max="1.5" step="0.01" value="1" title="مستوى الصوت العام" />
+        <select id="deviceSel" class="mini-select" title="جهاز إخراج الصوت"></select>
+      </div>
     </div>
     <div class="shortcuts">
       <span><kbd>Space</kbd> تشغيل</span><span><kbd>S</kbd> تقسيم</span>
