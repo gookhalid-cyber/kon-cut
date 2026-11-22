@@ -237,6 +237,79 @@ function addMediaToTrack(media, start, kindHint) {
   track.clips.push(clip);
   state.selected = { trackId: track.id, clipId: clip.id };
   recomputeDuration(); renderAll(); toast(`أُضيف: ${media.name}`);
+  return clip;
+}
+
+async function freezeFrame() {
+  const canvas = $('preview');
+  const hasContent = !$('previewEmpty') || $('previewEmpty').style.display === 'none';
+  if (!hasContent) { toast('ما فيش إطار في المعاينة لتجميده'); return; }
+  try {
+    let dataUrl = null, filePath = null;
+    try { dataUrl = canvas.toDataURL('image/png'); filePath = await window.api.saveFrame(dataUrl); }
+    catch (e) {
+      const clip = activeVisualClip(state.time);
+      if (!clip) throw new Error('مفيش مقطع فيديو في اللحظة دي');
+      const srcTime = (clip.inPoint || 0) + (state.time - clip.start) * (clip.speed || 1);
+      filePath = await window.api.grabFrame(clip.src, srcTime);
+      dataUrl = toUrl(filePath);
+    }
+    const media = {
+      name: `إطار مجمد ${fmtTime(state.time)}`, path: filePath, kind: 'image',
+      duration: 3, sourceDuration: 3, hasAudio: false,
+      width: canvas.width, height: canvas.height, thumb: dataUrl,
+    };
+    state.media.push(media);
+    renderMedia();
+    const clip = addMediaToTrack(media, state.time, 'video');
+    if (clip) { clip.duration = 3; refreshTimings(); }
+    toast('❄ تم تجميد الإطار وإضافته للخط الزمني');
+  } catch (e) { toast('فشل تجميد الإطار: ' + (e.message || e)); }
+}
+
+function activeVisualClip(t) {
+  const list = allClips().filter((c) => c.type === 'media' && c.mediaKind !== 'audio' &&
+    getTrack(c._track.id).kind === 'video' && !getTrack(c._track.id).hidden &&
+    t >= c.start && t < c.start + c.duration);
+  return list[list.length - 1] || null;
+}
+
+function targetVisualClip() {
+  if (state.selected) {
+    const c = findClip(state.selected.trackId, state.selected.clipId);
+    if (c && c.type === 'media' && c.mediaKind !== 'audio') return c;
+  }
+  return activeVisualClip(state.time);
+}
+
+function toggleMirror(axis) {
+  const c = targetVisualClip();
+  if (!c) { toast('اختار مقطع فيديو أو صورة أول'); return; }
+  const key = axis === 'v' ? 'mirrorV' : 'mirrorH';
+  c[key] = !c[key];
+  renderAll();
+  toast(c[key] ? (axis === 'v' ? '↕ انعكاس رأسي' : '↔ مرآة أفقية') : 'اتشال الانعكاس');
+}
+
+async function reverseSelected() {
+  const c = targetVisualClip();
+  if (!c) { toast('اختار مقطع فيديو أول'); return; }
+  if (c.mediaKind === 'image') { toast('الصورة ملهاش عكس — جرّب مقطع فيديو'); return; }
+  toast('⏳ جاري تجهيز المقطع المعكوس...');
+  try {
+    const srcDuration = Math.max(0.1, c.duration * (c.speed || 1));
+    let out;
+    try { out = await window.api.reverseClip(c.src, c.inPoint || 0, srcDuration, !!c.hasAudio); }
+    catch (e) { out = await window.api.reverseClip(c.src, c.inPoint || 0, srcDuration, false); }
+    const old = audioNodes.get(c.id);
+    if (old) { old.pause(); audioNodes.delete(c.id); }
+    c.src = out; c.inPoint = 0; c.duration = Math.round(srcDuration * 100) / 100; c.speed = 1;
+    state.media.push({
+      name: c.name + ' (معكوس)', path: out, kind: 'video', duration: c.duration,
+      sourceDuration: c.duration, hasAudio: !!c.hasAudio, thumb: toUrl(out),
+    });
+    renderMedia(); renderAll(); toast('✔ اتنفّذ العكس');
+  } catch (e) { toast('فشل العكس: ' + (e.message || e)); }
 }
 
 function addTextClip(preset, start) {
@@ -579,8 +652,13 @@ function renderTracks() {
       const kfDots = (c.keyframes || []).map((k) => `<i class="kf-dot" style="left:${(k.t - c.start) * state.pxPerSec}px"></i>`).join('');
       el.innerHTML = `<span class="clip-label">${escapeHtml(c.type === 'text' ? c.text : c.name || '')}</span>
         ${c.mask ? '<span class="mask-badge">◑</span>' : ''}${kfDots}
-        ${c.type === 'media' ? '<span class="clip-handle"></span>' : ''}`;
+        ${c.type !== 'transition' ? '<span class="clip-handle left"></span><span class="clip-handle"></span>' : ''}`;
       el.addEventListener('pointerdown', (e) => startClipDrag(e, track, c, el));
+      el.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        state.selected = { trackId: track.id, clipId: c.id };
+        renderInspector(); renderTracks(); showCtxMenu(e);
+      });
       lane.appendChild(el);
     });
 
@@ -588,48 +666,145 @@ function renderTracks() {
     lane.addEventListener('drop', (e) => {
       e.preventDefault(); const m = state.media[Number(e.dataTransfer.getData('text/plain'))]; if (!m) return;
       const rect = lane.getBoundingClientRect();
-      addMediaToTrack(m, Math.max(0, (e.clientX - rect.left) / state.pxPerSec), track.kind === 'audio' ? 'audio' : undefined);
+      const start = Math.max(0, (e.clientX - rect.left) / state.pxPerSec);
+      const clip = makeMediaClip(m, start);
+      if (!canDropOnTrack(clip, track)) { toast('الملف مش مناسب للمسار ده'); return; }
+      track.clips.push(clip);
+      insertClipWithRipple(clip, track, start, clip.id);
+      state.selected = { trackId: track.id, clipId: clip.id };
+      updatePlaybackUI(); renderAll(); toast(`أُضيف: ${m.name}`);
     });
     lane.addEventListener('pointerdown', (e) => { if (e.target === lane) { state.selected = null; renderInspector(); renderTracks(); } });
     row.appendChild(head); row.appendChild(lane); root.appendChild(row);
   });
 }
 
+function canDropOnTrack(clip, track) {
+  if (clip.type === 'media') return clip.mediaKind === 'audio' ? track.kind === 'audio' : track.kind === 'video';
+  if (clip.type === 'text') return track.kind === 'text';
+  if (clip.type === 'transition') return track.kind === 'video';
+  return false;
+}
+
+function snapStart(raw, clip, excludeId) {
+  if (!state.snap) return Math.max(0, raw);
+  const edges = [0, state.time];
+  state.project.tracks.forEach((t) => t.clips.forEach((c) => {
+    if (c.id !== excludeId) { edges.push(c.start, Math.round((c.start + c.duration) * 100) / 100); }
+  }));
+  let best = raw, dist = 0.18;
+  edges.forEach((edge) => {
+    [raw, raw + clip.duration].forEach((pos, i) => {
+      const d = Math.abs(pos - edge);
+      if (d < dist) { dist = d; best = i === 0 ? edge : edge - clip.duration; }
+    });
+  });
+  return Math.max(0, Math.round(best * 100) / 100);
+}
+
+function insertClipWithRipple(clip, track, desiredStart, excludeId) {
+  const others = track.clips.filter((c) => c.id !== (excludeId || clip.id));
+  const overlaps = (pos) => others.some((c) => pos < c.start + c.duration - 0.02 && pos + clip.duration > c.start + 0.02);
+  let s = Math.max(0, Math.round(desiredStart * 100) / 100);
+  if (state.snap) {
+    const candidates = [0, state.time, ...others.flatMap((c) => [c.start, Math.round((c.start + c.duration) * 100) / 100])];
+    let best = s, dist = 0.18;
+    candidates.forEach((v) => { const d = Math.abs(v - s); if (d < dist) { dist = d; best = v; } });
+    if (!overlaps(best)) s = Math.max(0, best);
+  }
+  let guard = 0;
+  while (guard++ < 50) {
+    const blocker = others
+      .filter((c) => s < c.start + c.duration - 0.02 && s + clip.duration > c.start + 0.02)
+      .sort((a, b) => a.start - b.start)[0];
+    if (!blocker) break;
+    const shift = Math.round((s + clip.duration - blocker.start) * 100) / 100;
+    others.forEach((c) => { if (c.start >= blocker.start - 0.02) c.start = Math.round((c.start + shift) * 100) / 100; });
+  }
+  clip.start = Math.round(s * 100) / 100;
+  track.clips = [...others, clip].sort((a, b) => a.start - b.start);
+}
+
 function startClipDrag(e, track, clip, el) {
   if (e.button !== 0) return;
-  e.stopPropagation();
+  e.preventDefault(); e.stopPropagation();
   state.selected = { trackId: track.id, clipId: clip.id };
   renderInspector();
   document.querySelectorAll('.clip.selected').forEach((n) => n.classList.remove('selected'));
   el.classList.add('selected');
-  const trimming = e.target.classList.contains('clip-handle');
-  const startX = e.clientX, origStart = Number(clip.start || 0), origDur = Number(clip.duration || 0);
+  el.classList.add('dragging');
+
+  const hit = e.target.classList;
+  const mode = hit.contains('clip-handle') ? (hit.contains('left') ? 'left' : 'right') : 'move';
+  const startX = e.clientX;
+  const origStart = Number(clip.start || 0), origDur = Number(clip.duration || 0);
+  const origIn = Number(clip.inPoint || 0);
+  const origKeys = (clip.keyframes || []).map((k) => ({ ...k }));
+  let targetTrack = track;
+  const guide = $('snapGuide');
 
   const move = (ev) => {
     const delta = (ev.clientX - startX) / state.pxPerSec;
-    if (trimming) {
-      clip.duration = Math.max(0.1, Math.round((origDur + delta) * 100) / 100);
-      if (clip.mediaKind === 'video') clip.duration = Math.min(clip.duration, Math.max(0.1, (clip.sourceDuration || 9999) - (clip.inPoint || 0)));
+    if (mode === 'right') {
+      let d = origDur + delta;
+      if (clip.type === 'media' && clip.mediaKind === 'video') d = Math.min(d, Math.max(0.1, (clip.sourceDuration || 9999) - origIn));
+      clip.duration = Math.max(0.1, Math.round(d * 100) / 100);
+    } else if (mode === 'left') {
+      let ns = Math.max(0, Math.min(origStart + origDur - 0.1, origStart + delta));
+      if (clip.type === 'media' && clip.mediaKind === 'video') ns = Math.max(origStart - origIn / (clip.speed || 1), ns);
+      ns = Math.round(ns * 100) / 100;
+      const diff = ns - origStart;
+      clip.start = ns;
+      clip.duration = Math.max(0.1, Math.round((origDur - diff) * 100) / 100);
+      if (clip.type === 'media') clip.inPoint = Math.max(0, Math.round((origIn + diff * (clip.speed || 1)) * 100) / 100);
+      clip.keyframes = origKeys.map((k) => ({ ...k, t: Math.round((k.t + diff) * 100) / 100 }));
     } else {
-      let ns = Math.max(0, Math.round((origStart + delta) * 100) / 100);
-      if (state.snap) {
-        const edges = [state.time];
-        state.project.tracks.forEach((t) => t.clips.forEach((c) => { if (c.id !== clip.id) { edges.push(c.start, c.start + c.duration); } }));
-        let best = null, dist = 0.18;
-        edges.forEach((edge) => {
-          if (Math.abs(ns - edge) < dist) { dist = Math.abs(ns - edge); best = { v: edge, mode: 'start' }; }
-          if (Math.abs(ns + clip.duration - edge) < dist) { dist = Math.abs(ns + clip.duration - edge); best = { v: edge, mode: 'end' }; }
-        });
-        if (best) ns = Math.max(0, best.mode === 'start' ? best.v : best.v - clip.duration);
+      const raw = origStart + delta;
+      const ns = snapStart(raw, clip, clip.id);
+      clip.start = ns;
+      if (ns !== Math.round(raw * 100) / 100 && ns > 0) {
+        guide.style.display = 'block';
+        guide.style.left = `${ns * state.pxPerSec}px`;
+      } else guide.style.display = 'none';
+      const under = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.track-lane');
+      document.querySelectorAll('.track-lane.drop-target').forEach((n) => n.classList.remove('drop-target'));
+      if (under) {
+        const t = getTrack(under.dataset.trackId);
+        if (t && canDropOnTrack(clip, t)) { targetTrack = t; under.classList.add('drop-target'); }
+        else targetTrack = track;
       }
-      clip.start = Math.round(ns * 100) / 100;
     }
     el.style.left = `${clip.start * state.pxPerSec}px`;
     el.style.width = `${Math.max(14, clip.duration * state.pxPerSec)}px`;
     recomputeDuration(); updatePlaybackUI();
   };
-  const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); renderAll(); };
-  document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    guide.style.display = 'none';
+    document.querySelectorAll('.track-lane.drop-target').forEach((n) => n.classList.remove('drop-target'));
+    el.classList.remove('dragging');
+    if (mode === 'move') {
+      const desired = clip.start;
+      if (targetTrack.id !== track.id) {
+        track.clips = track.clips.filter((c) => c.id !== clip.id);
+        targetTrack.clips.push(clip);
+      } else if (Math.abs(desired - origStart) < 0.25) {
+        clip.start = origStart;
+        targetTrack.clips.sort((a, b) => a.start - b.start);
+        renderAll(); return;
+      }
+      insertClipWithRipple(clip, targetTrack, desired, clip.id);
+      const shift = Math.round((clip.start - origStart) * 100) / 100;
+      clip.keyframes = origKeys.map((k) => ({ ...k, t: Math.max(clip.start, Math.min(clip.start + clip.duration, Math.round((k.t + shift) * 100) / 100)) }));
+    } else {
+      clip.keyframes = (clip.keyframes || []).filter((k) => k.t >= clip.start && k.t <= clip.start + clip.duration);
+    }
+    recomputeDuration(); renderAll();
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
 }
 
 function renderMotionInspector(c) {
@@ -843,6 +1018,7 @@ function drawTransformed(target, source, W, H, k, filter) {
   target.translate(W / 2 + (k.x - 0.5) * W, H / 2 + (k.y - 0.5) * H);
   target.rotate((k.rotation || 0) * Math.PI / 180);
   target.scale(k.scale || 1, k.scale || 1);
+  if (k.mirrorH || k.mirrorV) target.scale(k.mirrorH ? -1 : 1, k.mirrorV ? -1 : 1);
   target.translate(-W / 2, -H / 2);
   const s = Math.max(W / sw, H / sh), dw = sw * s, dh = sh * s;
   target.drawImage(source, (W - dw) / 2, (H - dh) / 2, dw, dh);
@@ -892,6 +1068,7 @@ function drawPreview() {
   mediaActive.forEach((c) => {
     const target = (c.inPoint || 0) + (t - c.start) * (c.speed || 1);
     const k = evalKfs(c, t);
+    k.mirrorH = !!c.mirrorH; k.mirrorV = !!c.mirrorV;
     if (c.mediaKind === 'image') {
       const im = getImage(c.src); if (im.complete && im.naturalWidth) paintSource(ctx, im, W, H, k, filter, c.mask, c.maskScale);
       return;
@@ -1015,6 +1192,29 @@ $('zoom').addEventListener('input', (e) => { state.pxPerSec = Number(e.target.va
 $('snapBtn').addEventListener('click', () => { state.snap = !state.snap; $('snapBtn').classList.toggle('active', state.snap); toast(state.snap ? 'المحاذاة مفعّلة' : 'المحاذاة متوقفة'); });
 $('fitBtn').addEventListener('click', () => { state.pxPerSec = clamp(Math.floor(($('timelineScroll').clientWidth - 150) / Math.max(1, state.project.duration)), 20, 200); $('zoom').value = state.pxPerSec; renderRuler(); renderTracks(); updatePlaybackUI(); });
 
+$('freezeBtn').addEventListener('click', freezeFrame);
+$('mirrorBtn').addEventListener('click', () => toggleMirror('h'));
+$('reverseBtn').addEventListener('click', reverseSelected);
+
+const ctxMenu = $('ctxMenu');
+function showCtxMenu(e) {
+  e.preventDefault();
+  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 170) + 'px';
+  ctxMenu.classList.add('show');
+}
+document.querySelector('.viewer').addEventListener('contextmenu', showCtxMenu);
+ctxMenu.addEventListener('click', (e) => {
+  const act = e.target.dataset.act; if (!act) return;
+  ctxMenu.classList.remove('show');
+  if (act === 'freeze') freezeFrame();
+  if (act === 'mirrorH') toggleMirror('h');
+  if (act === 'mirrorV') toggleMirror('v');
+  if (act === 'reverse') reverseSelected();
+});
+document.addEventListener('click', (e) => { if (!ctxMenu.contains(e.target)) ctxMenu.classList.remove('show'); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ctxMenu.classList.remove('show'); });
+
 $('fullscreenBtn').addEventListener('click', () => {
   const v = document.querySelector('.viewer');
   if (document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen?.();
@@ -1067,6 +1267,9 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
   if (e.key.toLowerCase() === 's' && !e.ctrlKey) splitSelected();
+  if (e.key.toLowerCase() === 'f' && !e.ctrlKey) freezeFrame();
+  if (e.key.toLowerCase() === 'm' && !e.ctrlKey) toggleMirror('h');
+  if (e.key.toLowerCase() === 'r' && !e.ctrlKey) reverseSelected();
   if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); $('saveBtn').click(); }
 });
 

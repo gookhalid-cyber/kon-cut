@@ -8,5 +8,8 @@ contextBridge.exposeInMainWorld('api', {
   exportVideo: (project, output) => ipcRenderer.invoke('export:video', project, output),
   getPaths: () => ipcRenderer.invoke('app:paths'),
   assetPath: (rel) => ipcRenderer.invoke('app:asset', rel),
+  saveFrame: (dataUrl) => ipcRenderer.invoke('frame:save', dataUrl),
+  grabFrame: (src, time) => ipcRenderer.invoke('frame:grab', src, time),
+  reverseClip: (src, start, duration, hasAudio) => ipcRenderer.invoke('clip:reverse', src, start, duration, hasAudio),
   onProgress: (cb) => ipcRenderer.on('export:progress', (_, p) => cb(p)),
 });

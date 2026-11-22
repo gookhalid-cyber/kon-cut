@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, buildFfmpegArgs } = require('./ffmpeg-builder');
+const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, buildFfmpegArgs } = require('./ffmpeg-builder');
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.setName('Kon Cut');
@@ -108,6 +108,24 @@ ipcMain.handle('export:video', async (event, project, outputPath) => {
       resolve(code === 0 ? { ok: true, path: outputPath } : { ok: false, error: err });
     });
   });
+});
+
+ipcMain.handle('frame:save', async (_, dataUrl) => {
+  if (!/^data:image\/png;base64,/.test(dataUrl || '')) throw new Error('invalid frame');
+  const file = path.join(TEMP_DIR, `freeze_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.png`);
+  fs.writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
+  return file;
+});
+
+ipcMain.handle('frame:grab', async (_, src, time) => {
+  const out = path.join(TEMP_DIR, `freeze_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.png`);
+  return grabFrame(src, time, out);
+});
+
+ipcMain.handle('clip:reverse', async (_, src, start, duration, hasAudio) => {
+  const out = path.join(TEMP_DIR, `reverse_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp4`);
+  reverseClip(src, start, duration, !!hasAudio, out);
+  return out;
 });
 
 ipcMain.handle('app:paths', () => ({

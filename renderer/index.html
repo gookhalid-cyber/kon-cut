@@ -114,6 +114,9 @@
           <option value="9:16">9:16</option>
           <option value="1:1">1:1</option>
         </select>
+        <button class="pbtn small" id="freezeBtn" title="تجميد الإطار (Freeze Frame) — أضف صورة من اللحظة الحالية">❄</button>
+        <button class="pbtn small" id="mirrorBtn" title="مرآة أفقية للمقطع المحدد">↔</button>
+        <button class="pbtn small" id="reverseBtn" title="عكس المقطع المحدد (Reverse)">⏪</button>
         <button class="pbtn small" id="fullscreenBtn" title="ملء الشاشة">⛶</button>
       </div>
       <div class="audio-bar">
@@ -127,7 +130,8 @@
       </div>
     </div>
     <div class="shortcuts">
-      <span><kbd>Space</kbd> تشغيل</span><span><kbd>S</kbd> تقسيم</span>
+      <span><kbd>Space</kbd> تشغيل</span><span><kbd>S</kbd> تقسيم</span><span><kbd>F</kbd> تجميد</span>
+      <span><kbd>M</kbd> مرآة</span><span><kbd>R</kbd> عكس</span>
       <span><kbd>Del</kbd> حذف</span><span><kbd>Ctrl+S</kbd> حفظ</span>
     </div>
   </main>
@@ -170,12 +174,20 @@
         <div class="ruler" id="ruler"></div>
       </div>
       <div id="tracks"></div>
+      <div class="snap-guide" id="snapGuide"></div>
       <div class="playhead" id="playhead"></div>
     </div>
   </div>
 </section>
 
 <div class="toast" id="toast"></div>
+
+<div class="ctx-menu" id="ctxMenu">
+  <button data-act="freeze">❄ تجميد الإطار</button>
+  <button data-act="mirrorH">↔ مرآة أفقية</button>
+  <button data-act="mirrorV">↕ انعكاس رأسي</button>
+  <button data-act="reverse">⏪ عكس المقطع</button>
+</div>
 
 <div class="modal-backdrop" id="exportModal">
   <div class="modal">

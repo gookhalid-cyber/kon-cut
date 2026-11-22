@@ -9,7 +9,7 @@ const project = {
       kind: 'video', clips: [{
         type: 'media', src, mediaKind: 'video', hasAudio: true,
         start: 0, duration: 2, inPoint: 0, volume: 1,
-        speed: 1.2, mask: 'circle', maskScale: 1,
+        speed: 1.2, mask: 'circle', maskScale: 1, mirrorH: true,
       }, {
         type: 'transition', name: 'تلاشي أسود', effect: 'black', start: 1.4, duration: 0.5,
       }],

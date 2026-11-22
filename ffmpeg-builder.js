@@ -207,10 +207,12 @@ function buildFfmpegArgs(project, outputPath) {
       const speed = clampNum(c.speed || 1, 0.25, 4);
       const srcDur = dur * speed;
       const label = `v${n}`;
+      const flips = [c.mirrorH ? 'hflip' : '', c.mirrorV ? 'vflip' : ''].filter(Boolean).join(',');
       filters.push(
         `[${c._input}:v]trim=start=${inP.toFixed(3)}:end=${(inP + srcDur).toFixed(3)},` +
         `setpts=(PTS-STARTPTS)/${speed.toFixed(3)},` +
-        `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[${label}]`
+        `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1` +
+        `${flips ? ',' + flips : ''}[${label}]`
       );
       let finalLabel = label;
       if (c._maskInput != null) {
@@ -286,4 +288,29 @@ function buildFfmpegArgs(project, outputPath) {
   return args;
 }
 
-module.exports = { APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb, buildAss, buildFfmpegArgs };
+function grabFrame(filePath, time, outPath) {
+  execFileSync(FFMPEG, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-ss', Math.max(0, Number(time) || 0).toFixed(3),
+    '-i', filePath, '-frames:v', '1', '-update', '1', outPath,
+  ], { cwd: APP_DIR, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+  return outPath;
+}
+
+function reverseClip(filePath, start, duration, hasAudio, outPath) {
+  const ss = Math.max(0, Number(start) || 0).toFixed(3);
+  const d = Math.max(0.05, Number(duration) || 1).toFixed(3);
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-ss', ss, '-t', d, '-i', filePath];
+  if (hasAudio) {
+    args.push('-filter_complex', '[0:v]reverse,setpts=PTS-STARTPTS[v];[0:a]areverse,asetpts=PTS-STARTPTS[a]',
+      '-map', '[v]', '-map', '[a]', '-c:a', 'aac', '-b:a', '192k');
+  } else {
+    args.push('-vf', 'reverse,setpts=PTS-STARTPTS', '-an');
+  }
+  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart', outPath);
+  execFileSync(FFMPEG, args, { cwd: APP_DIR, windowsHide: true, maxBuffer: 8 * 1024 * 1024, timeout: 10 * 60 * 1000 });
+  return outPath;
+}
+
+module.exports = { APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb, grabFrame, reverseClip, buildAss, buildFfmpegArgs };
