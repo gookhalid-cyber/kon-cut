@@ -160,6 +160,37 @@ function maskPathFor(key) {
   return MASK_KEYS.includes(key) ? path.join(APP_DIR, 'assets', 'masks', key + '.png') : null;
 }
 
+function maskSegments(c) {
+  const end = Number(c.start || 0) + Math.max(0.01, Number(c.duration || 0.1));
+  const changes = (c.keyframes || []).filter((k) => k.maskShape || k.maskMode)
+    .slice().sort((a, b) => a.t - b.t);
+  const segs = [];
+  let from = Number(c.start || 0), shape = c.mask, mode = c.maskMode || 'in';
+  changes.forEach((k) => {
+    if (k.t > from + 0.001 && k.t < end) { segs.push({ start: from, end: k.t, shape, mode }); from = k.t; }
+    if (k.maskShape) shape = k.maskShape;
+    if (k.maskMode) mode = k.maskMode;
+  });
+  segs.push({ start: from, end, shape, mode });
+  return segs;
+}
+
+function num(v, digits = 3) { return Number(v || 0).toFixed(digits); }
+
+function kfExpr(kfs, prop, fallback, timeOffset = 0) {
+  const pts = kfs.filter((k) => k[prop] != null && Number.isFinite(Number(k[prop])))
+    .map((k) => ({ t: Number(k.t), v: Number(k[prop]) }))
+    .sort((a, b) => a.t - b.t);
+  if (!pts.length) return num(fallback, 4);
+  const tv = timeOffset ? `(t+${num(timeOffset)})` : 't';
+  let expr = `if(lt(${tv},${num(pts[0].t)}),${num(pts[0].v, 4)},`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    expr += `if(lt(${tv},${num(b.t)}),${num(a.v, 4)}+(${num(b.v, 4)}-${num(a.v, 4)})*(${tv}-${num(a.t)})/${num(Math.max(0.001, b.t - a.t))},`;
+  }
+  return (expr + num(pts[pts.length - 1].v, 4) + ')'.repeat(pts.length)).replace(/,/g, '\\,');
+}
+
 function atempoFor(speed) {
   let s = clampNum(speed, 0.25, 4);
   const parts = [];
@@ -189,11 +220,18 @@ function buildFfmpegArgs(project, outputPath) {
     inputArgs.push('-i', c.src);
     c._input = inputIdx++;
   });
+  const maskPlans = new Map();
   mediaClips.forEach((c) => {
-    if ((c.mediaKind === 'video' || c.mediaKind === 'image') && MASK_KEYS.includes(c.mask)) {
-      const p = maskPathFor(c.mask);
-      if (p) { inputArgs.push('-loop', '1', '-framerate', String(fps), '-i', p); c._maskInput = inputIdx++; }
-    }
+    if (c.mediaKind !== 'video' && c.mediaKind !== 'image') return;
+    const segs = maskSegments(c);
+    segs.forEach((seg) => {
+      if (!MASK_KEYS.includes(seg.shape)) return;
+      const p = maskPathFor(seg.shape);
+      if (!p) return;
+      inputArgs.push('-loop', '1', '-framerate', String(fps), '-i', p);
+      seg._maskInput = inputIdx++;
+    });
+    maskPlans.set(c.id, segs);
   });
 
   const filters = [`color=c=black:s=${W}x${H}:r=${fps}:d=${duration.toFixed(3)}[base]`];
@@ -215,14 +253,42 @@ function buildFfmpegArgs(project, outputPath) {
         `${flips ? ',' + flips : ''}[${label}]`
       );
       let finalLabel = label;
-      if (c._maskInput != null) {
-        const s = clampNum(c.maskScale || 1, 0.3, 2);
-        filters.push(
-          `[${c._maskInput}:v]scale=${Math.round(W * s)}:${Math.round(H * s)},` +
-          `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,format=gray[mk${n}]`
-        );
-        filters.push(`[${label}][mk${n}]alphamerge[vm${n}]`);
-        finalLabel = `vm${n}`;
+      const segs = (maskPlans.get(c.id) || []).filter((s) => s._maskInput != null);
+      if (segs.length) {
+        const kfs = c.keyframes || [];
+        const featherVals = kfs.filter((k) => k.maskFeather != null).map((k) => Number(k.maskFeather));
+        const feather = Math.max(Number(c.maskFeather || 0), 0, ...featherVals);
+        if (segs.length > 1) {
+          filters.push(`[${label}]split=${segs.length}[${segs.map((_, i) => `vsp${n}_${i}`).join('][')}]`);
+        }
+        let maskBase = label;
+        segs.forEach((seg, si) => {
+          const mk = `mk${n}_${si}`, vm = `vm${n}_${si}`, mo = `mo${n}_${si}`;
+          const mb = `mb${n}_${si}`, sc = `ms${n}_${si}`;
+          const off = seg.start;
+          const scaleE = kfExpr(kfs, 'maskScale', c.maskScale ?? 1, off);
+          const openE = kfExpr(kfs, 'maskOpen', c.maskOpen ?? 1, off);
+          const mxE = kfExpr(kfs, 'maskX', c.maskX ?? 0.5, off);
+          const myE = kfExpr(kfs, 'maskY', c.maskY ?? 0.5, off);
+          const rotE = kfExpr(kfs, 'maskRotation', c.maskRotation ?? 0, off);
+          filters.push(
+            `[${seg._maskInput}:v]scale=w=${W}*max(0.01\\,(${scaleE}))*max(0.01\\,(${openE})):` +
+            `h=${H}*max(0.01\\,(${scaleE}))*max(0.01\\,(${openE})):eval=frame[${sc}]`
+          );
+          filters.push(`color=c=black:s=${W}x${H}:r=${fps}:d=${Math.max(0.02, seg.end - seg.start).toFixed(3)}[${mb}]`);
+          filters.push(
+            `[${mb}][${sc}]overlay=x=(${W}-overlay_w)/2+(${mxE}-0.5)*${W}:y=(${H}-overlay_h)/2+(${myE}-0.5)*${H}:eval=frame,` +
+            `rotate=a=(${rotE})*PI/180:ow=${W}:oh=${H}:c=black` +
+            (feather > 0.001 ? `,gblur=sigma=${(feather * 12).toFixed(2)}` : '') +
+            `,format=gray${seg.mode === 'out' ? ',negate' : ''}[${mk}]`
+          );
+          filters.push(`[${segs.length > 1 ? `vsp${n}_${si}` : label}][${mk}]alphamerge[${vm}]`);
+          filters.push(
+            `[${maskBase}][${vm}]overlay=0:0:enable='between(t,${num(seg.start)},${num(seg.end)})'[${mo}]`
+          );
+          maskBase = mo;
+        });
+        finalLabel = maskBase;
       }
       const out = `vo${n}`;
       filters.push(

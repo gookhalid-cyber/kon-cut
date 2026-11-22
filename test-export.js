@@ -9,7 +9,12 @@ const project = {
       kind: 'video', clips: [{
         type: 'media', src, mediaKind: 'video', hasAudio: true,
         start: 0, duration: 2, inPoint: 0, volume: 1,
-        speed: 1.2, mask: 'circle', maskScale: 1, mirrorH: true,
+        speed: 1.2, mask: 'circle', maskScale: 1, mirrorH: true, maskMode: 'out',
+        keyframes: [
+          { t: 0, maskX: 0.5, maskY: 0.5, maskRotation: 0, maskScale: 0.8, maskOpen: 0.4, maskFeather: 0 },
+          { t: 1, maskShape: 'star', maskRotation: 45, maskScale: 1.2, maskOpen: 1, maskFeather: 0.1 },
+          { t: 2, maskMode: 'in', maskOpen: 1 },
+        ],
       }, {
         type: 'transition', name: 'تلاشي أسود', effect: 'black', start: 1.4, duration: 0.5,
       }],

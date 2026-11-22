@@ -73,6 +73,8 @@ const ANIM_PRESETS = [
 ];
 
 const KF_DEFAULT = { x: 0.5, y: 0.5, scale: 1, opacity: 1, rotation: 0 };
+const MASK_KF_DEFAULT = { maskX: 0.5, maskY: 0.5, maskScale: 1, maskRotation: 0, maskOpen: 1, maskFeather: 0 };
+const MASK_KF_KEYS = Object.keys(MASK_KF_DEFAULT);
 
 const state = {
   project: {
@@ -362,9 +364,23 @@ function splitSelected() {
 }
 
 /* ---------- keyframes & masks ---------- */
-function baseKf(c) { return { ...KF_DEFAULT, x: c.type === 'text' ? Number(c.x ?? 0.5) : 0.5, y: c.type === 'text' ? Number(c.y ?? 0.5) : 0.5 }; }
+function baseKf(c) {
+  const base = { ...KF_DEFAULT, x: c.type === 'text' ? Number(c.x ?? 0.5) : 0.5, y: c.type === 'text' ? Number(c.y ?? 0.5) : 0.5 };
+  if (c.mask) Object.assign(base, MASK_KF_DEFAULT, {
+    maskScale: Number(c.maskScale ?? 1), maskRotation: Number(c.maskRotation ?? 0),
+    maskX: Number(c.maskX ?? 0.5), maskY: Number(c.maskY ?? 0.5),
+    maskOpen: Number(c.maskOpen ?? 1), maskFeather: Number(c.maskFeather ?? 0),
+  });
+  return base;
+}
 
 function sortedKfs(c) { return [...(c.keyframes || [])].sort((a, b) => a.t - b.t); }
+
+function discreteAt(c, t, key, fallback) {
+  let v = fallback;
+  sortedKfs(c).forEach((k) => { if (k.t <= t && k[key] != null) v = k[key]; });
+  return v;
+}
 
 function evalKfs(c, t) {
   const base = baseKf(c);
@@ -418,6 +434,7 @@ function applyMask(key) {
   if (!c || c.type !== 'media' || c.mediaKind === 'audio') { toast('الماسك شغال على مقاطع الفيديو والصور'); return; }
   c.mask = c.mask === key ? null : key;
   c.maskScale = c.maskScale || 1;
+  c.maskMode = c.maskMode || 'in';
   renderAll(); toast(c.mask ? `اتطبّق ماسك: ${MASK_PRESETS.find((m) => m.key === key).name}` : 'اتشال الماسك');
 }
 
@@ -843,6 +860,25 @@ function renderMotionInspector(c) {
   bindKf('kf_x', 'x'); bindKf('kf_y', 'y'); bindKf('kf_scale', 'scale'); bindKf('kf_rot', 'rotation'); bindKf('kf_op', 'opacity');
 }
 
+function maskSlider(id, label, min, max, step, value, prop) {
+  return `<div class="field"><label>${label} <b class="kv" id="kv_m_${id}">${Number(value).toFixed(2)}</b><button class="kf-mini" data-mkf="${prop}" title="إضافة كي فريم">◇</button></label>
+    <input type="range" id="m_${id}" min="${min}" max="${max}" step="${step}" value="${value}" /></div>`;
+}
+
+function setMaskValue(c, prop, value) {
+  c[prop] = value;
+  const kf = kfAt(c, state.time);
+  if (kf) kf[prop] = value;
+}
+
+function addMaskKeyframe(c, prop) {
+  const at = clamp(state.time, c.start, c.start + c.duration);
+  let kf = kfAt(c, at);
+  if (!kf) { kf = { t: Math.round(at * 100) / 100, ...evalKfs(c, at) }; c.keyframes = c.keyframes || []; c.keyframes.push(kf); }
+  kf[prop] = c[prop];
+  renderAll(); toast('◇ اتنضاف كي فريم للماسك');
+}
+
 function renderInspector() {
   const box = $('inspector');
   const note = '';
@@ -894,7 +930,22 @@ function renderInspector() {
     <div class="field-row"><div class="field"><label>السرعة ×</label><input type="number" id="f_speed" min="0.25" max="4" step="0.05" value="${c.speed || 1}" /></div>
       <div class="field"><label>حجم الماسك</label><input type="number" id="f_mscale" min="0.4" max="1.6" step="0.05" value="${c.maskScale || 1}" /></div></div>
     <div class="speed-btns"><button class="mini-btn" data-sp="0.5">0.5×</button><button class="mini-btn" data-sp="1">1×</button><button class="mini-btn" data-sp="2">2×</button></div>
-    ${c.mediaKind !== 'audio' ? `<div class="field"><label>الماسك</label><select id="f_mask"><option value="">بدون</option>${MASK_PRESETS.map((m) => `<option value="${m.key}" ${c.mask === m.key ? 'selected' : ''}>${m.name}</option>`).join('')}</select></div>` : ''}
+    ${c.mediaKind !== 'audio' ? `
+    <div class="section-title">الماسك — شكل / اتجاه / حجم / فتح وقفل</div>
+    <div class="field-row">
+      <div class="field"><label>الشكل <button class="kf-mini" data-mkf="maskShape" title="كي فريم للشكل">◇</button></label>
+        <select id="f_mask"><option value="">بدون</option>${MASK_PRESETS.map((m) => `<option value="${m.key}" ${c.mask === m.key ? 'selected' : ''}>${m.name}</option>`).join('')}</select></div>
+      <div class="field"><label>الاتجاه <button class="kf-mini" data-mkf="maskMode" title="كي فريم للاتجاه">◇</button></label>
+        <select id="f_maskMode"><option value="in" ${(c.maskMode || 'in') === 'in' ? 'selected' : ''}>داخل (IN)</option><option value="out" ${c.maskMode === 'out' ? 'selected' : ''}>خارج (OUT)</option></select></div>
+    </div>
+    <div class="mask-controls">
+      ${maskSlider('mx', 'موضع أفقي', 0, 1, 0.01, c.maskX ?? 0.5, 'maskX')}
+      ${maskSlider('my', 'موضع رأسي', 0, 1, 0.01, c.maskY ?? 0.5, 'maskY')}
+      ${maskSlider('mrot', 'الاتجاه °', -180, 180, 1, c.maskRotation ?? 0, 'maskRotation')}
+      ${maskSlider('msc', 'الحجم', 0.2, 2, 0.01, c.maskScale ?? 1, 'maskScale')}
+      ${maskSlider('mopen', 'فتح / قفل', 0, 1, 0.01, c.maskOpen ?? 1, 'maskOpen')}
+      ${maskSlider('mfeather', 'نعومة الحافة', 0, 1, 0.01, c.maskFeather ?? 0, 'maskFeather')}
+    </div>` : ''}
     <div class="section-title">معلومات</div><div class="inspector-sub">${c.width ? `${c.width}×${c.height}` : ''} ${c.hasAudio ? '· يوجد صوت' : ''}</div>`;
   $('f_track').addEventListener('change', (e) => {
     const dest = getTrack(e.target.value); track.clips = track.clips.filter((x) => x.id !== c.id); dest.clips.push(c);
@@ -912,7 +963,30 @@ function renderInspector() {
   $('f_speed').addEventListener('change', (e) => setSpeed(e.target.value));
   document.querySelectorAll('[data-sp]').forEach((b) => b.addEventListener('click', () => { setSpeed(b.dataset.sp); renderInspector(); }));
   if ($('f_mscale')) $('f_mscale').addEventListener('input', (e) => { c.maskScale = clamp(Number(e.target.value) || 1, 0.4, 1.6); drawPreview(); });
-  if ($('f_mask')) $('f_mask').addEventListener('change', (e) => { c.mask = e.target.value || null; renderTracks(); drawPreview(); });
+  if ($('f_mask')) $('f_mask').addEventListener('change', (e) => {
+    c.mask = e.target.value || null;
+    const kf = kfAt(c, state.time); if (kf) kf.maskShape = c.mask;
+    renderTracks(); drawPreview();
+  });
+  if ($('f_maskMode')) $('f_maskMode').addEventListener('change', (e) => {
+    c.maskMode = e.target.value;
+    const kf = kfAt(c, state.time); if (kf) kf.maskMode = c.maskMode;
+    drawPreview();
+  });
+  const maskInputs = [
+    ['m_mx', 'maskX', 'mx'], ['m_my', 'maskY', 'my'], ['m_mrot', 'maskRotation', 'mrot'],
+    ['m_msc', 'maskScale', 'msc'], ['m_mopen', 'maskOpen', 'mopen'], ['m_mfeather', 'maskFeather', 'mfeather'],
+  ];
+  maskInputs.forEach(([id, prop, short]) => {
+    const input = $(id); if (!input) return;
+    input.addEventListener('input', (e) => {
+      const v = Number(e.target.value);
+      setMaskValue(c, prop, v);
+      const label = $('kv_m_' + short); if (label) label.textContent = v.toFixed(2);
+      drawPreview();
+    });
+  });
+  document.querySelectorAll('[data-mkf]').forEach((b) => b.addEventListener('click', () => addMaskKeyframe(c, b.dataset.mkf)));
 }
 
 function refreshTimings() { recomputeDuration(); renderTracks(); renderRuler(); updatePlaybackUI(); }
@@ -1026,7 +1100,7 @@ function drawTransformed(target, source, W, H, k, filter) {
   return true;
 }
 
-function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale) {
+function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode) {
   k = { ...KF_DEFAULT, ...k };
   if (!maskKey) { drawTransformed(ctx, source, W, H, k, filter); return; }
   fxCanvas.width = W; fxCanvas.height = H;
@@ -1035,8 +1109,21 @@ function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale) {
   const im = getMaskImg(maskKey);
   if (im.complete && im.naturalWidth) {
     const s = clamp(maskScale || 1, 0.3, 2), dw = W * s, dh = H * s;
-    fxCtx.save(); fxCtx.globalCompositeOperation = 'destination-in'; fxCtx.globalAlpha = 1;
-    fxCtx.drawImage(im, (W - dw) / 2, (H - dh) / 2, dw, dh); fxCtx.restore();
+    const mk = { ...MASK_KF_DEFAULT, ...k };
+    const cx = W / 2 + ((mk.maskX ?? 0.5) - 0.5) * W;
+    const cy = H / 2 + ((mk.maskY ?? 0.5) - 0.5) * H;
+    const open = clamp(mk.maskOpen ?? 1, 0, 1);
+    const scale = clamp(mk.maskScale ?? 1, 0.1, 3) * open;
+    const feather = clamp(mk.maskFeather ?? 0, 0, 1) * 24;
+    const w = W * scale, h = H * scale;
+    fxCtx.save();
+    fxCtx.globalCompositeOperation = maskMode === 'out' ? 'destination-out' : 'destination-in';
+    fxCtx.globalAlpha = 1;
+    if (feather) fxCtx.filter = `blur(${feather.toFixed(1)}px)`;
+    fxCtx.translate(cx, cy);
+    fxCtx.rotate((mk.maskRotation || 0) * Math.PI / 180);
+    fxCtx.drawImage(im, -w / 2, -h / 2, w, h);
+    fxCtx.restore();
   }
   ctx.save(); ctx.globalAlpha = clamp(k.opacity, 0, 1); ctx.drawImage(fxCanvas, 0, 0); ctx.restore();
 }
@@ -1069,8 +1156,10 @@ function drawPreview() {
     const target = (c.inPoint || 0) + (t - c.start) * (c.speed || 1);
     const k = evalKfs(c, t);
     k.mirrorH = !!c.mirrorH; k.mirrorV = !!c.mirrorV;
+    const shape = discreteAt(c, t, 'maskShape', c.mask);
+    const mode = discreteAt(c, t, 'maskMode', c.maskMode || 'in');
     if (c.mediaKind === 'image') {
-      const im = getImage(c.src); if (im.complete && im.naturalWidth) paintSource(ctx, im, W, H, k, filter, c.mask, c.maskScale);
+      const im = getImage(c.src); if (im.complete && im.naturalWidth) paintSource(ctx, im, W, H, k, filter, shape, k.maskScale, mode);
       return;
     }
     const v = getVideo(c.src);
@@ -1079,7 +1168,7 @@ function drawPreview() {
       v.currentTime = clamp(target, 0, Math.max(0, (v.duration || target + 1) - 0.05));
       v.addEventListener('seeked', () => { if (!state.playing) drawPreview(); }, { once: true }); return;
     }
-    try { paintSource(ctx, v, W, H, k, filter, c.mask, c.maskScale); } catch (e) { /* not ready */ }
+    try { paintSource(ctx, v, W, H, k, filter, shape, k.maskScale, mode); } catch (e) { /* not ready */ }
   });
   ctx.filter = 'none';
 

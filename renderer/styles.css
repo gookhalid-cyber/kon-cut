@@ -203,6 +203,9 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
 .kv { color: var(--accent); float: left; font-variant-numeric: tabular-nums; }
 .kf-list { display: flex; flex-direction: column; gap: 4px; }
 .kf-item { display: flex; align-items: center; justify-content: space-between; background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; font-size: 9px; direction: ltr; }
+.kf-mini { background: transparent; border: 1px solid var(--line); color: #ffe27a; border-radius: 4px; font-size: 9px; padding: 0 3px; margin: 0 3px; cursor: pointer; }
+.kf-mini:hover { background: #4a3d14; }
+.mask-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
 
 /* ---------- timeline ---------- */
 .timeline { flex: 0 0 268px; height: 268px; background: var(--bg2); border-top: 1px solid var(--line); display: flex; flex-direction: column; }
