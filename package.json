@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test:export": "node test-export.js"
+    "test:export": "node test-export.js",
+    "test:segment": "node test-segment.js"
   },
   "devDependencies": {
     "electron": "^40.0.0"

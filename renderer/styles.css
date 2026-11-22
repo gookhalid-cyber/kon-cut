@@ -206,6 +206,10 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
 .kf-mini { background: transparent; border: 1px solid var(--line); color: #ffe27a; border-radius: 4px; font-size: 9px; padding: 0 3px; margin: 0 3px; cursor: pointer; }
 .kf-mini:hover { background: #4a3d14; }
 .mask-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+.seg-btns { display: flex; gap: 5px; margin: -2px 0 7px; }
+.seg-btns .mini-btn { flex: 1; padding: 6px 4px; font-size: 9px; }
+.seg-btns .mini-btn.on { color: #7bffc0; border-color: #7bffc0; background: #123327; }
+.seg-status { color: var(--dim); font-size: 9px; min-height: 14px; margin: -3px 0 6px; }
 
 /* ---------- timeline ---------- */
 .timeline { flex: 0 0 268px; height: 268px; background: var(--bg2); border-top: 1px solid var(--line); display: flex; flex-direction: column; }

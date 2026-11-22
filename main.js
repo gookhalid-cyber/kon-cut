@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, buildFfmpegArgs } = require('./ffmpeg-builder');
+const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs } = require('./ffmpeg-builder');
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.setName('Kon Cut');
@@ -125,6 +125,23 @@ ipcMain.handle('frame:grab', async (_, src, time) => {
 ipcMain.handle('clip:reverse', async (_, src, start, duration, hasAudio) => {
   const out = path.join(TEMP_DIR, `reverse_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp4`);
   reverseClip(src, start, duration, !!hasAudio, out);
+  return out;
+});
+
+ipcMain.handle('clip:segment', async (event, opts) => {
+  const o = opts || {};
+  const mode = o.mode === 'person' ? 'person' : 'general';
+  const ext = o.image ? 'png' : 'mp4';
+  const out = path.join(TEMP_DIR, `seg_${mode}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`);
+  await segmentMatte({
+    src: o.src, out, mode, image: !!o.image,
+    start: Number(o.start) || 0,
+    duration: Number(o.duration) || 1,
+    fps: Number(o.fps) || 30,
+    width: Number(o.width) || 960,
+    height: Number(o.height) || 540,
+    onProgress: (percent) => event.sender.send('segment:progress', { clipId: o.clipId, percent }),
+  });
   return out;
 });
 

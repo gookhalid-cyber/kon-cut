@@ -306,12 +306,62 @@ async function reverseSelected() {
     const old = audioNodes.get(c.id);
     if (old) { old.pause(); audioNodes.delete(c.id); }
     c.src = out; c.inPoint = 0; c.duration = Math.round(srcDuration * 100) / 100; c.speed = 1;
+    c.segMatte = null; c.segMode = null; c.segStart = null; c.segDuration = null;
     state.media.push({
       name: c.name + ' (معكوس)', path: out, kind: 'video', duration: c.duration,
       sourceDuration: c.duration, hasAudio: !!c.hasAudio, thumb: toUrl(out),
     });
     renderMedia(); renderAll(); toast('✔ اتنفّذ العكس');
   } catch (e) { toast('فشل العكس: ' + (e.message || e)); }
+}
+
+/* ---------- AI background / person isolation ---------- */
+let segmentBusy = false;
+let segmentClipId = null;
+
+function segModeLabel(mode) { return mode === 'person' ? 'عزل الأشخاص' : 'عزل الخلفية'; }
+
+function showProgress(title) {
+  $('progressTitle').textContent = title;
+  $('exportModal').classList.add('show');
+  $('progressFill').style.width = '0%';
+  $('progressText').textContent = '0%';
+}
+
+function clearSegmentation(c) {
+  if (!c || !c.segMatte) { toast('مفيش عزل مفعّل على المقطع'); return; }
+  c.segMatte = null; c.segMode = null; c.segStart = null; c.segDuration = null;
+  renderAll(); toast('اتشال العزل');
+}
+
+async function applySegmentation(mode) {
+  const c = targetVisualClip();
+  if (!c) { toast('اختار مقطع فيديو أو صورة أول'); return; }
+  if (segmentBusy) { toast('في عملية عزل شغالة بالفعل'); return; }
+  segmentBusy = true; segmentClipId = c.id;
+  const label = segModeLabel(mode);
+  showProgress(`⏳ جاري ${label}...`);
+  try {
+    const image = c.mediaKind === 'image';
+    const fps = state.project.fps || 30;
+    const pw = state.project.width || 1920, ph = state.project.height || 1080;
+    const width = Math.min(960, pw);
+    const height = Math.max(2, Math.round(width * ph / pw));
+    const sourceDuration = Math.max(0.1, Number(c.sourceDuration || c.duration || 1));
+    const start = image ? 0 : clamp(Number(c.inPoint || 0), 0, Math.max(0, sourceDuration - 0.1));
+    const duration = image ? 1 : clamp(Number(c.duration || 1) * (c.speed || 1), 0.1, Math.max(0.1, sourceDuration - start));
+    const out = await window.api.segmentClip({
+      src: c.src, mode, image, start, duration, fps, width, height, clipId: c.id,
+    });
+    c.segMatte = out; c.segMode = mode; c.segStart = start; c.segDuration = duration;
+    renderAll(); toast(`✔ تم ${label}`);
+  } catch (e) {
+    toast(`فشل ${label}: ${(e && e.message ? e.message : e)}`.slice(0, 300));
+  } finally {
+    segmentBusy = false; segmentClipId = null;
+    $('exportModal').classList.remove('show');
+    const st = $('segStatus'); if (st && c.segMatte) st.textContent = `مفعّل: ${segModeLabel(c.segMode)}`;
+  }
 }
 
 function addTextClip(preset, start) {
@@ -931,6 +981,13 @@ function renderInspector() {
       <div class="field"><label>حجم الماسك</label><input type="number" id="f_mscale" min="0.4" max="1.6" step="0.05" value="${c.maskScale || 1}" /></div></div>
     <div class="speed-btns"><button class="mini-btn" data-sp="0.5">0.5×</button><button class="mini-btn" data-sp="1">1×</button><button class="mini-btn" data-sp="2">2×</button></div>
     ${c.mediaKind !== 'audio' ? `
+    <div class="section-title">عزل الذكاء — خلفية / أشخاص</div>
+    <div class="seg-btns">
+      <button class="mini-btn ${c.segMode === 'general' ? 'on' : ''}" id="inspSegGeneral">🪄 عزل خلفية</button>
+      <button class="mini-btn ${c.segMode === 'person' ? 'on' : ''}" id="inspSegPerson">🧍 عزل أشخاص</button>
+      <button class="mini-btn" id="inspSegClear">✕ إلغاء</button>
+    </div>
+    <div class="seg-status" id="segStatus">${c.segMatte ? `مفعّل: ${segModeLabel(c.segMode)}` : 'بدون عزل — اختار زرار للتشغيل'}</div>
     <div class="section-title">الماسك — شكل / اتجاه / حجم / فتح وقفل</div>
     <div class="field-row">
       <div class="field"><label>الشكل <button class="kf-mini" data-mkf="maskShape" title="كي فريم للشكل">◇</button></label>
@@ -986,6 +1043,9 @@ function renderInspector() {
       drawPreview();
     });
   });
+  if ($('inspSegGeneral')) $('inspSegGeneral').addEventListener('click', () => applySegmentation('general'));
+  if ($('inspSegPerson')) $('inspSegPerson').addEventListener('click', () => applySegmentation('person'));
+  if ($('inspSegClear')) $('inspSegClear').addEventListener('click', () => clearSegmentation(c));
   document.querySelectorAll('[data-mkf]').forEach((b) => b.addEventListener('click', () => addMaskKeyframe(c, b.dataset.mkf)));
 }
 
@@ -1002,6 +1062,13 @@ function getVideo(src) {
 function getImage(src) {
   if (!imageEls.has(src)) { const im = new Image(); im.src = toUrl(src); imageEls.set(src, im); }
   return imageEls.get(src);
+}
+
+function getSegMatte(c, target) {
+  if (!c.segMatte) return null;
+  if (c.mediaKind === 'image') return { source: getImage(c.segMatte), time: 0 };
+  const v = getVideo(c.segMatte);
+  return { source: v, time: Math.max(0, target - Number(c.segStart ?? c.inPoint ?? 0)) };
 }
 
 function getAudioNode(c) {
@@ -1100,29 +1167,38 @@ function drawTransformed(target, source, W, H, k, filter) {
   return true;
 }
 
-function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode) {
+function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode, segSource, segInvert) {
   k = { ...KF_DEFAULT, ...k };
-  if (!maskKey) { drawTransformed(ctx, source, W, H, k, filter); return; }
+  if (!maskKey && !segSource) { drawTransformed(ctx, source, W, H, k, filter); return; }
   fxCanvas.width = W; fxCanvas.height = H;
   fxCtx.clearRect(0, 0, W, H);
   drawTransformed(fxCtx, source, W, H, { ...k, opacity: 1 }, filter);
-  const im = getMaskImg(maskKey);
-  if (im.complete && im.naturalWidth) {
-    const s = clamp(maskScale || 1, 0.3, 2), dw = W * s, dh = H * s;
-    const mk = { ...MASK_KF_DEFAULT, ...k };
-    const cx = W / 2 + ((mk.maskX ?? 0.5) - 0.5) * W;
-    const cy = H / 2 + ((mk.maskY ?? 0.5) - 0.5) * H;
-    const open = clamp(mk.maskOpen ?? 1, 0, 1);
-    const scale = clamp(mk.maskScale ?? 1, 0.1, 3) * open;
-    const feather = clamp(mk.maskFeather ?? 0, 0, 1) * 24;
-    const w = W * scale, h = H * scale;
+  if (maskKey) {
+    const im = getMaskImg(maskKey);
+    if (im.complete && im.naturalWidth) {
+      const mk = { ...MASK_KF_DEFAULT, ...k };
+      const cx = W / 2 + ((mk.maskX ?? 0.5) - 0.5) * W;
+      const cy = H / 2 + ((mk.maskY ?? 0.5) - 0.5) * H;
+      const open = clamp(mk.maskOpen ?? 1, 0, 1);
+      const scale = clamp(mk.maskScale || maskScale || 1, 0.1, 3) * open;
+      const feather = clamp(mk.maskFeather ?? 0, 0, 1) * 24;
+      const w = W * scale, h = H * scale;
+      fxCtx.save();
+      fxCtx.globalCompositeOperation = maskMode === 'out' ? 'destination-out' : 'destination-in';
+      fxCtx.globalAlpha = 1;
+      if (feather) fxCtx.filter = `blur(${feather.toFixed(1)}px)`;
+      fxCtx.translate(cx, cy);
+      fxCtx.rotate((mk.maskRotation || 0) * Math.PI / 180);
+      fxCtx.drawImage(im, -w / 2, -h / 2, w, h);
+      fxCtx.restore();
+    }
+  }
+  if (segSource && (segSource.readyState >= 2 || (segSource.complete && segSource.naturalWidth))) {
     fxCtx.save();
-    fxCtx.globalCompositeOperation = maskMode === 'out' ? 'destination-out' : 'destination-in';
+    fxCtx.globalCompositeOperation = segInvert ? 'destination-out' : 'destination-in';
     fxCtx.globalAlpha = 1;
-    if (feather) fxCtx.filter = `blur(${feather.toFixed(1)}px)`;
-    fxCtx.translate(cx, cy);
-    fxCtx.rotate((mk.maskRotation || 0) * Math.PI / 180);
-    fxCtx.drawImage(im, -w / 2, -h / 2, w, h);
+    fxCtx.filter = 'none';
+    fxCtx.drawImage(segSource, 0, 0, W, H);
     fxCtx.restore();
   }
   ctx.save(); ctx.globalAlpha = clamp(k.opacity, 0, 1); ctx.drawImage(fxCanvas, 0, 0); ctx.restore();
@@ -1158,17 +1234,27 @@ function drawPreview() {
     k.mirrorH = !!c.mirrorH; k.mirrorV = !!c.mirrorV;
     const shape = discreteAt(c, t, 'maskShape', c.mask);
     const mode = discreteAt(c, t, 'maskMode', c.maskMode || 'in');
+    const seg = getSegMatte(c, target);
+    const segInvert = !shape && mode === 'out' && !!seg;
+    let src = null;
     if (c.mediaKind === 'image') {
-      const im = getImage(c.src); if (im.complete && im.naturalWidth) paintSource(ctx, im, W, H, k, filter, shape, k.maskScale, mode);
+      src = getImage(c.src);
+      if (!src.complete || !src.naturalWidth) return;
+    } else {
+      src = getVideo(c.src);
+      if (src.readyState < 2) { src.addEventListener('loadeddata', () => { if (!state.playing) drawPreview(); }, { once: true }); return; }
+      if (!state.playing && Math.abs(src.currentTime - target) > 0.12 && !src.seeking) {
+        src.currentTime = clamp(target, 0, Math.max(0, (src.duration || target + 1) - 0.05));
+        src.addEventListener('seeked', () => { if (!state.playing) drawPreview(); }, { once: true }); return;
+      }
+    }
+    if (seg && seg.source instanceof HTMLVideoElement && !state.playing &&
+        Math.abs(seg.source.currentTime - seg.time) > 0.12 && !seg.source.seeking) {
+      seg.source.currentTime = clamp(seg.time, 0, Math.max(0, (seg.source.duration || seg.time + 1) - 0.05));
+      seg.source.addEventListener('seeked', () => { if (!state.playing) drawPreview(); }, { once: true });
       return;
     }
-    const v = getVideo(c.src);
-    if (v.readyState < 2) { v.addEventListener('loadeddata', () => { if (!state.playing) drawPreview(); }, { once: true }); return; }
-    if (!state.playing && Math.abs(v.currentTime - target) > 0.12 && !v.seeking) {
-      v.currentTime = clamp(target, 0, Math.max(0, (v.duration || target + 1) - 0.05));
-      v.addEventListener('seeked', () => { if (!state.playing) drawPreview(); }, { once: true }); return;
-    }
-    try { paintSource(ctx, v, W, H, k, filter, shape, k.maskScale, mode); } catch (e) { /* not ready */ }
+    try { paintSource(ctx, src, W, H, k, filter, shape, k.maskScale, mode, seg && seg.source, segInvert); } catch (e) { /* not ready */ }
   });
   ctx.filter = 'none';
 
@@ -1284,12 +1370,14 @@ $('fitBtn').addEventListener('click', () => { state.pxPerSec = clamp(Math.floor(
 $('freezeBtn').addEventListener('click', freezeFrame);
 $('mirrorBtn').addEventListener('click', () => toggleMirror('h'));
 $('reverseBtn').addEventListener('click', reverseSelected);
+$('segGeneralBtn').addEventListener('click', () => applySegmentation('general'));
+$('segPersonBtn').addEventListener('click', () => applySegmentation('person'));
 
 const ctxMenu = $('ctxMenu');
 function showCtxMenu(e) {
   e.preventDefault();
-  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
-  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 170) + 'px';
+  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - 190) + 'px';
+  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 240) + 'px';
   ctxMenu.classList.add('show');
 }
 document.querySelector('.viewer').addEventListener('contextmenu', showCtxMenu);
@@ -1300,6 +1388,9 @@ ctxMenu.addEventListener('click', (e) => {
   if (act === 'mirrorH') toggleMirror('h');
   if (act === 'mirrorV') toggleMirror('v');
   if (act === 'reverse') reverseSelected();
+  if (act === 'segGeneral') applySegmentation('general');
+  if (act === 'segPerson') applySegmentation('person');
+  if (act === 'segClear') clearSegmentation(targetVisualClip());
 });
 document.addEventListener('click', (e) => { if (!ctxMenu.contains(e.target)) ctxMenu.classList.remove('show'); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ctxMenu.classList.remove('show'); });
@@ -1343,12 +1434,19 @@ $('openBtn').addEventListener('click', async () => {
 $('exportBtn').addEventListener('click', async () => {
   if (!state.project.duration) { toast('الخط الزمني فاضي'); return; }
   const out = await window.api.pickExportPath(state.project.name || 'output'); if (!out) return;
-  $('exportModal').classList.add('show'); $('progressFill').style.width = '0%'; $('progressText').textContent = '0%';
+  showProgress('جاري التصدير…');
   const res = await window.api.exportVideo(state.project, out);
   $('exportModal').classList.remove('show');
   if (res.ok) toast('تم التصدير بنجاح'); else toast('فشل التصدير');
 });
 window.api.onProgress((p) => { $('progressFill').style.width = `${p.percent}%`; $('progressText').textContent = `${p.percent}%`; });
+window.api.onSegmentProgress((p) => {
+  if (segmentClipId != null && p.clipId != null && p.clipId !== segmentClipId) return;
+  const percent = clamp(Number(p.percent) || 0, 0, 100);
+  $('progressFill').style.width = `${percent}%`;
+  $('progressText').textContent = `${percent}%`;
+  const st = $('segStatus'); if (st) st.textContent = `جاري العزل... ${percent}%`;
+});
 
 document.addEventListener('keydown', (e) => {
   const tag = document.activeElement?.tagName;

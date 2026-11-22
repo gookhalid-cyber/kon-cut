@@ -1,7 +1,8 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const APP_DIR = __dirname;
 function resolveBin(name) {
@@ -14,6 +15,25 @@ function resolveBin(name) {
 const FFMPEG = resolveBin('ffmpeg');
 const FFPROBE = resolveBin('ffprobe');
 const TEMP_DIR = path.join(APP_DIR, 'temp');
+
+function resolvePython() {
+  const candidates = [
+    process.env.KONCUT_PYTHON,
+    path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'python.exe'),
+    path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python311', 'python.exe'),
+    'python',
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try {
+      if (p === 'python' || fs.existsSync(p)) {
+        execFileSync(p, ['-c', 'import rembg,PIL'], { stdio: 'ignore', timeout: 8000 });
+        return p;
+      }
+    } catch (e) { /* try next */ }
+  }
+  throw new Error('Python + rembg غير مثبّتين');
+}
+const REMBG_SCRIPT = path.join(APP_DIR, 'tools', 'remove_bg.py');
 
 function makeThumb(filePath, kind) {
   if (kind === 'image') return filePath;
@@ -220,6 +240,12 @@ function buildFfmpegArgs(project, outputPath) {
     inputArgs.push('-i', c.src);
     c._input = inputIdx++;
   });
+  mediaClips.forEach((c) => {
+    if (!c.segMatte || !fs.existsSync(path.resolve(APP_DIR, c.segMatte))) return;
+    if (c.mediaKind === 'image') inputArgs.push('-loop', '1', '-framerate', String(fps));
+    inputArgs.push('-i', c.segMatte);
+    c._segInput = inputIdx++;
+  });
   const maskPlans = new Map();
   mediaClips.forEach((c) => {
     if (c.mediaKind !== 'video' && c.mediaKind !== 'image') return;
@@ -253,7 +279,12 @@ function buildFfmpegArgs(project, outputPath) {
         `${flips ? ',' + flips : ''}[${label}]`
       );
       let finalLabel = label;
-      const segs = (maskPlans.get(c.id) || []).filter((s) => s._maskInput != null);
+      const hasSeg = c._segInput != null;
+      const allSegs = maskPlans.get(c.id) || [];
+      let segs = hasSeg ? allSegs : allSegs.filter((s) => s._maskInput != null);
+      if (hasSeg && !segs.length) {
+        segs = [{ start: Number(c.start || 0), end: Number(c.start || 0) + dur, shape: null, mode: c.maskMode || 'in' }];
+      }
       if (segs.length) {
         const kfs = c.keyframes || [];
         const featherVals = kfs.filter((k) => k.maskFeather != null).map((k) => Number(k.maskFeather));
@@ -261,27 +292,53 @@ function buildFfmpegArgs(project, outputPath) {
         if (segs.length > 1) {
           filters.push(`[${label}]split=${segs.length}[${segs.map((_, i) => `vsp${n}_${i}`).join('][')}]`);
         }
+        if (hasSeg) {
+          const segStart = Number(c.segStart ?? c.inPoint ?? 0);
+          const matteOffset = Math.max(0, (inP - segStart) / speed);
+          const matteChain =
+            `[${c._segInput}:v]setpts=(PTS-STARTPTS)/${speed.toFixed(3)},` +
+            `trim=start=${matteOffset.toFixed(3)}:end=${(matteOffset + dur).toFixed(3)},setpts=PTS-STARTPTS,` +
+            `scale=${W}:${H},format=gray`;
+          if (segs.length > 1) {
+            filters.push(`${matteChain},split=${segs.length}[${segs.map((_, i) => `msp${n}_${i}`).join('][')}]`);
+          } else {
+            filters.push(`${matteChain}[segm${n}]`);
+          }
+        }
         let maskBase = label;
         segs.forEach((seg, si) => {
           const mk = `mk${n}_${si}`, vm = `vm${n}_${si}`, mo = `mo${n}_${si}`;
-          const mb = `mb${n}_${si}`, sc = `ms${n}_${si}`;
-          const off = seg.start;
-          const scaleE = kfExpr(kfs, 'maskScale', c.maskScale ?? 1, off);
-          const openE = kfExpr(kfs, 'maskOpen', c.maskOpen ?? 1, off);
-          const mxE = kfExpr(kfs, 'maskX', c.maskX ?? 0.5, off);
-          const myE = kfExpr(kfs, 'maskY', c.maskY ?? 0.5, off);
-          const rotE = kfExpr(kfs, 'maskRotation', c.maskRotation ?? 0, off);
-          filters.push(
-            `[${seg._maskInput}:v]scale=w=${W}*max(0.01\\,(${scaleE}))*max(0.01\\,(${openE})):` +
-            `h=${H}*max(0.01\\,(${scaleE}))*max(0.01\\,(${openE})):eval=frame[${sc}]`
-          );
-          filters.push(`color=c=black:s=${W}x${H}:r=${fps}:d=${Math.max(0.02, seg.end - seg.start).toFixed(3)}[${mb}]`);
-          filters.push(
-            `[${mb}][${sc}]overlay=x=(${W}-overlay_w)/2+(${mxE}-0.5)*${W}:y=(${H}-overlay_h)/2+(${myE}-0.5)*${H}:eval=frame,` +
-            `rotate=a=(${rotE})*PI/180:ow=${W}:oh=${H}:c=black` +
-            (feather > 0.001 ? `,gblur=sigma=${(feather * 12).toFixed(2)}` : '') +
-            `,format=gray${seg.mode === 'out' ? ',negate' : ''}[${mk}]`
-          );
+          const sh = `sh${n}_${si}`, mb = `mb${n}_${si}`, sc = `ms${n}_${si}`;
+          const matteLabel = hasSeg ? (segs.length > 1 ? `msp${n}_${si}` : `segm${n}`) : null;
+          if (seg._maskInput != null) {
+            const off = seg.start;
+            const scaleE = kfExpr(kfs, 'maskScale', c.maskScale ?? 1, off);
+            const openE = kfExpr(kfs, 'maskOpen', c.maskOpen ?? 1, off);
+            const mxE = kfExpr(kfs, 'maskX', c.maskX ?? 0.5, off);
+            const myE = kfExpr(kfs, 'maskY', c.maskY ?? 0.5, off);
+            const rotE = kfExpr(kfs, 'maskRotation', c.maskRotation ?? 0, off);
+            filters.push(
+              `[${seg._maskInput}:v]scale=w=${W}*max(0.01\\,(${scaleE}))*max(0.01\\,(${openE})):` +
+              `h=${H}*max(0.01\\,(${scaleE}))*max(0.01\\,(${openE})):eval=frame[${sc}]`
+            );
+            filters.push(`color=c=black:s=${W}x${H}:r=${fps}:d=${Math.max(0.02, seg.end - seg.start).toFixed(3)}[${mb}]`);
+            filters.push(
+              `[${mb}][${sc}]overlay=x=(${W}-overlay_w)/2+(${mxE}-0.5)*${W}:y=(${H}-overlay_h)/2+(${myE}-0.5)*${H}:eval=frame,` +
+              `rotate=a=(${rotE})*PI/180:ow=${W}:oh=${H}:c=black` +
+              (feather > 0.001 ? `,gblur=sigma=${(feather * 12).toFixed(2)}` : '') +
+              `,format=gray[${sh}]`
+            );
+          }
+          const shf = `mf${n}_${si}`;
+          const invertShape = seg.mode === 'out' && seg._maskInput != null;
+          const invertMatte = seg.mode === 'out' && seg._maskInput == null && matteLabel;
+          if (seg._maskInput != null) {
+            filters.push(`[${sh}]format=gray${invertShape ? ',negate' : ''}[${shf}]`);
+            if (matteLabel) filters.push(`[${shf}][${matteLabel}]blend=all_mode=multiply,format=gray[${mk}]`);
+            else filters.push(`[${shf}]null[${mk}]`);
+          } else if (matteLabel) {
+            filters.push(`[${matteLabel}]format=gray${invertMatte ? ',negate' : ''}[${mk}]`);
+          }
           filters.push(`[${segs.length > 1 ? `vsp${n}_${si}` : label}][${mk}]alphamerge[${vm}]`);
           filters.push(
             `[${maskBase}][${vm}]overlay=0:0:enable='between(t,${num(seg.start)},${num(seg.end)})'[${mo}]`
@@ -379,4 +436,75 @@ function reverseClip(filePath, start, duration, hasAudio, outPath) {
   return outPath;
 }
 
-module.exports = { APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb, grabFrame, reverseClip, buildAss, buildFfmpegArgs };
+function procDone(proc, label, errRef) {
+  return new Promise((resolve, reject) => {
+    proc.on('error', (e) => reject(new Error(`${label}: ${e.message || e}`)));
+    proc.on('close', (code) => code === 0
+      ? resolve()
+      : reject(new Error(`${label} (${code}): ${(errRef.value || '').slice(-600)}`)));
+  });
+}
+
+async function segmentMatte(opts) {
+  const {
+    src, out, mode = 'general', image = false,
+    start = 0, duration = 1, fps = 30,
+    width = 1280, height = 720, onProgress,
+  } = opts;
+  if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+  const python = resolvePython();
+  const model = mode === 'person' ? 'u2net_human_seg' : 'isnet-general-use';
+  const baseArgs = ['-u', REMBG_SCRIPT, '--model', model, '--width', Math.round(width), '--height', Math.round(height)];
+
+  if (image) {
+    execFileSync(python, [...baseArgs, '--image', src, '--output', out], {
+      cwd: APP_DIR, windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 3 * 60 * 1000,
+    });
+    if (onProgress) onProgress(100);
+    return out;
+  }
+
+  const ss = Math.max(0, Number(start) || 0).toFixed(3);
+  const d = Math.max(0.05, Number(duration) || 1).toFixed(3);
+  const decErr = { value: '' }, pyErr = { value: '' }, encErr = { value: '' };
+  const dec = spawn(FFMPEG, [
+    '-hide_banner', '-loglevel', 'error', '-y', '-ss', ss, '-t', d, '-i', src,
+    '-vf', `fps=${fps},scale=${Math.round(width)}:${Math.round(height)}:force_original_aspect_ratio=decrease,` +
+      `pad=${Math.round(width)}:${Math.round(height)}:(ow-iw)/2:(oh-ih)/2,format=rgb24`,
+    '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
+  ], { cwd: APP_DIR, windowsHide: true });
+  const py = spawn(python, baseArgs, { cwd: APP_DIR, windowsHide: true });
+  const enc = spawn(FFMPEG, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', `${Math.round(width)}x${Math.round(height)}`,
+    '-r', String(fps), '-i', 'pipe:0',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'gray',
+    '-movflags', '+faststart', out,
+  ], { cwd: APP_DIR, windowsHide: true });
+
+  dec.stderr.on('data', (b) => { decErr.value = (decErr.value + b.toString()).slice(-4000); });
+  py.stderr.on('data', (b) => { pyErr.value = (pyErr.value + b.toString()).slice(-4000); });
+  enc.stderr.on('data', (b) => { encErr.value = (encErr.value + b.toString()).slice(-4000); });
+
+  const totalFrames = Math.max(1, Math.round(Number(d) * Number(fps)));
+  let bytes = 0;
+  py.stdout.on('data', (chunk) => {
+    bytes += chunk.length;
+    if (onProgress) onProgress(Math.min(99, Math.round((bytes / (width * height)) / totalFrames * 100)));
+  });
+  dec.stdout.pipe(py.stdin);
+  py.stdout.pipe(enc.stdin);
+
+  await Promise.all([
+    procDone(dec, 'FFmpeg decode', decErr),
+    procDone(py, 'rembg', pyErr),
+    procDone(enc, 'FFmpeg matte', encErr),
+  ]);
+  if (onProgress) onProgress(100);
+  return out;
+}
+
+module.exports = {
+  APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb,
+  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs,
+};

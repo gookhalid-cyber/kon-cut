@@ -117,6 +117,8 @@
         <button class="pbtn small" id="freezeBtn" title="تجميد الإطار (Freeze Frame) — أضف صورة من اللحظة الحالية">❄</button>
         <button class="pbtn small" id="mirrorBtn" title="مرآة أفقية للمقطع المحدد">↔</button>
         <button class="pbtn small" id="reverseBtn" title="عكس المقطع المحدد (Reverse)">⏪</button>
+        <button class="pbtn small" id="segGeneralBtn" title="عزل الخلفية — مقطع عام (RemBG)">🪄</button>
+        <button class="pbtn small" id="segPersonBtn" title="عزل الأشخاص — مقطع بشري (RemBG)">🧍</button>
         <button class="pbtn small" id="fullscreenBtn" title="ملء الشاشة">⛶</button>
       </div>
       <div class="audio-bar">
@@ -187,11 +189,14 @@
   <button data-act="mirrorH">↔ مرآة أفقية</button>
   <button data-act="mirrorV">↕ انعكاس رأسي</button>
   <button data-act="reverse">⏪ عكس المقطع</button>
+  <button data-act="segGeneral">🪄 عزل الخلفية</button>
+  <button data-act="segPerson">🧍 عزل الأشخاص</button>
+  <button data-act="segClear">✕ إلغاء العزل</button>
 </div>
 
 <div class="modal-backdrop" id="exportModal">
   <div class="modal">
-    <h3>جاري التصدير…</h3>
+    <h3 id="progressTitle">جاري التصدير…</h3>
     <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
     <p class="progress-text" id="progressText">0%</p>
   </div>
