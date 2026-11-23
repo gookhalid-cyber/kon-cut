@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('api', {
   grabFrame: (src, time) => ipcRenderer.invoke('frame:grab', src, time),
   reverseClip: (src, start, duration, hasAudio) => ipcRenderer.invoke('clip:reverse', src, start, duration, hasAudio),
   segmentClip: (opts) => ipcRenderer.invoke('clip:segment', opts),
+  audioPeaks: (src) => ipcRenderer.invoke('audio:peaks', src),
   onProgress: (cb) => ipcRenderer.on('export:progress', (_, p) => cb(p)),
   onSegmentProgress: (cb) => ipcRenderer.on('segment:progress', (_, p) => cb(p)),
 });

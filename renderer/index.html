@@ -195,6 +195,10 @@
   <button data-act="segGeneral">🪄 عزل الخلفية</button>
   <button data-act="segPerson">🧍 عزل الأشخاص</button>
   <button data-act="segClear">✕ إلغاء العزل</button>
+  <button data-act="duplicate">⧉ تكرار المقطع</button>
+  <button data-act="copy">⧋ نسخ</button>
+  <button data-act="paste">⧊ لصق</button>
+  <button data-act="rippleDelete">⌫ حذف مع دفع للخلف</button>
 </div>
 
 <div class="modal-backdrop" id="exportModal">
@@ -229,6 +233,7 @@
 </div>
 
 <input type="file" id="hiddenFile" accept="video/*,audio/*,image/*" multiple hidden />
+<script src="../kf-easing.js"></script>
 <script src="history.js"></script>
 <script src="app.js"></script>
 </body>

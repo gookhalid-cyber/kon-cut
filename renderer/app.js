@@ -88,7 +88,8 @@ const state = {
       { id: uid(), kind: 'text', name: 'نصوص', clips: [] },
     ],
   },
-  media: [], selected: null, time: 0, playing: false,
+  media: [], selected: null, selection: new Set(), anchorSel: null, clipboard: [], peaks: new Map(),
+  time: 0, playing: false,
   zoom: 70, pxPerSec: 70, snap: true,
   activeTab: 'media', inspectorTab: 'basic',
   hoverPreview: null, hoverFilter: null, hoverText: null, hoverMask: null,
@@ -137,6 +138,9 @@ function restoreHistory(snap, label) {
   state.project.filter = state.project.filter || 'none';
   state.project.adjust = state.project.adjust || { bright: 0, contrast: 0, sat: 0, temp: 0 };
   if (state.selected && !findClip(state.selected.trackId, state.selected.clipId)) state.selected = null;
+  const liveKeys = new Set(allClips().map((c) => selKey(c._track.id, c.id)));
+  state.selection = new Set([...state.selection].filter((k) => liveKeys.has(k)));
+  state.anchorSel = null;
   state.time = clamp(state.time, 0, state.project.duration || 0);
   const ids = new Set(allClips().map((c) => c.id));
   [...audioNodes.keys()].forEach((id) => {
@@ -446,6 +450,7 @@ function addTextClip(preset, start) {
   track.clips.push(clip);
   state.selected = { trackId: track.id, clipId: clip.id };
   recomputeDuration(); renderAll(); commit('إضافة نص');
+  return clip;
 }
 
 function addTransition(preset) {
@@ -459,11 +464,129 @@ function addTransition(preset) {
   recomputeDuration(); renderAll(); commit('إضافة انتقال'); toast(`أُضيف انتقال: ${preset.name}`);
 }
 
-function deleteSelected() {
-  if (!state.selected) return;
-  const t = getTrack(state.selected.trackId); if (!t) return;
-  t.clips = t.clips.filter((c) => c.id !== state.selected.clipId);
-  state.selected = null; recomputeDuration(); renderAll(); commit('حذف مقطع');
+/* ---------- multi-selection & editing ---------- */
+const selKey = (trackId, clipId) => `${trackId}:${clipId}`;
+
+function selectedClips() {
+  const out = [];
+  state.project.tracks.forEach((t) => t.clips.forEach((c) => {
+    if (state.selection.has(selKey(t.id, c.id))) out.push({ track: t, clip: c });
+  }));
+  if (!out.length && state.selected) {
+    const t = getTrack(state.selected.trackId);
+    const c = t && findClip(t.id, state.selected.clipId);
+    if (c) out.push({ track: t, clip: c });
+  }
+  return out.filter((x) => !x.track.locked);
+}
+
+function syncSelectionUI() {
+  document.querySelectorAll('.clip[data-selkey]').forEach((el) => {
+    el.classList.toggle('selected', state.selection.has(el.dataset.selkey));
+  });
+}
+
+function selectClip(track, clip, additive, range) {
+  const key = selKey(track.id, clip.id);
+  if (range && state.anchorSel) {
+    const a = state.anchorSel;
+    const sameTrack = a.trackId === track.id;
+    const pool = sameTrack ? track.clips.map((c) => ({ track, clip: c })) : selectedClips();
+    const lo = Math.min(a.start, Number(clip.start || 0)), hi = Math.max(a.start, Number(clip.start || 0));
+    state.selection = new Set(pool.filter((x) => x.clip.start >= lo - 0.001 && x.clip.start <= hi + 0.001)
+      .map((x) => selKey(x.track.id, x.clip.id)));
+  } else if (additive) {
+    if (state.selection.has(key)) state.selection.delete(key);
+    else state.selection.add(key);
+    state.anchorSel = { trackId: track.id, clipId: clip.id, start: clip.start };
+  } else {
+    state.selection = new Set([key]);
+    state.anchorSel = { trackId: track.id, clipId: clip.id, start: clip.start };
+  }
+  if (!state.selected || !state.selection.has(selKey(state.selected.trackId, state.selected.clipId))) {
+    state.selected = { trackId: track.id, clipId: clip.id };
+  }
+  syncSelectionUI(); renderInspector();
+}
+
+function clearSelection() {
+  state.selection.clear(); state.anchorSel = null; state.selected = null;
+  syncSelectionUI(); renderInspector();
+}
+
+function deleteSelected(ripple = false) {
+  const items = selectedClips();
+  if (!items.length) return;
+  items.forEach(({ track, clip }) => {
+    track.clips = track.clips.filter((c) => c.id !== clip.id);
+    if (ripple) track.clips.forEach((c) => {
+      if (c.start > clip.start) c.start = Math.max(0, Math.round((c.start - clip.duration) * 100) / 100);
+    });
+  });
+  clearSelection(); recomputeDuration(); renderAll();
+  commit(ripple ? 'حذف مع دفع للخلف' : 'حذف مقطع');
+  toast(ripple ? 'اتحذف والخط الزمني اتقفل' : 'اتحذف المقطع');
+}
+
+function duplicateSelected() {
+  const items = selectedClips();
+  if (!items.length) { toast('اختار مقطع أول'); return; }
+  const next = new Set();
+  items.forEach(({ track, clip }) => {
+    const copy = JSON.parse(JSON.stringify(clip));
+    copy.id = uid();
+    insertClipWithRipple(copy, track, Math.max(clip.start + clip.duration, state.time), copy.id);
+    next.add(selKey(track.id, copy.id));
+  });
+  state.selection = next;
+  const first = items[0];
+  state.selected = { trackId: first.track.id, clipId: [...next][0].split(':')[1] };
+  state.anchorSel = null;
+  recomputeDuration(); renderAll(); commit('تكرار مقطع'); toast(`اتكرّر ${items.length} مقطع`);
+}
+
+function copySelected() {
+  const items = selectedClips();
+  if (!items.length) { toast('اختار مقطع أول'); return; }
+  state.clipboard = items.map(({ clip }) => JSON.parse(JSON.stringify(clip)));
+  toast(`اتنسخ ${items.length} مقطع`);
+}
+
+function pasteClips() {
+  if (!state.clipboard.length) { toast('النسخة فاضية'); return; }
+  const next = new Set(); let count = 0;
+  state.clipboard.forEach((src) => {
+    const kind = src.type === 'text' ? 'text' : (src.mediaKind === 'audio' ? 'audio' : 'video');
+    const track = state.project.tracks.find((t) => t.kind === kind && !t.locked);
+    if (!track) return;
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = uid();
+    insertClipWithRipple(copy, track, state.time + count * 0.05, copy.id);
+    next.add(selKey(track.id, copy.id)); count++;
+  });
+  if (!count) { toast('مفيش مسار مناسب للصق'); return; }
+  state.selection = next;
+  const firstKey = [...next][0];
+  state.selected = { trackId: firstKey.split(':')[0], clipId: firstKey.split(':')[1] };
+  recomputeDuration(); renderAll(); commit('لصق مقاطع'); toast(`اتلصق ${count} مقطع`);
+}
+
+function moveTrack(track, dir) {
+  const i = state.project.tracks.indexOf(track), j = i + dir;
+  if (i < 0 || j < 0 || j >= state.project.tracks.length) return;
+  const arr = state.project.tracks;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  renderAll(); commit('ترتيب المسارات');
+}
+
+function selectAll() {
+  state.selection = new Set();
+  state.project.tracks.forEach((t) => {
+    if (!t.locked) t.clips.forEach((c) => state.selection.add(selKey(t.id, c.id)));
+  });
+  const first = [...state.selection][0];
+  if (first) { const [tid, cid] = first.split(':'); state.selected = { trackId: tid, clipId: cid }; }
+  syncSelectionUI(); renderInspector(); toast(`اتحدد ${state.selection.size} مقطع`);
 }
 
 function splitSelected() {
@@ -512,9 +635,10 @@ function evalKfs(c, t) {
     const a = kfs[i], b = kfs[i + 1];
     if (t >= a.t && t <= b.t) {
       const p = (t - a.t) / Math.max(0.001, b.t - a.t);
+      const eased = window.KFEasing.ease(p, a.easing);
       const out = {};
       Object.keys(base).forEach((k) => {
-        out[k] = Number(a[k] ?? base[k]) + (Number(b[k] ?? base[k]) - Number(a[k] ?? base[k])) * p;
+        out[k] = Number(a[k] ?? base[k]) + (Number(b[k] ?? base[k]) - Number(a[k] ?? base[k])) * eased;
       });
       return out;
     }
@@ -523,6 +647,45 @@ function evalKfs(c, t) {
 }
 
 function kfAt(c, t) { return (c.keyframes || []).find((k) => Math.abs(k.t - t) < 0.02); }
+
+// Audio level at an absolute timeline time, using the same easing as export.
+function volumeAt(c, t) {
+  const base = Number(c.volume ?? 1);
+  const pts = (c.keyframes || [])
+    .filter((k) => k.volume != null && Number.isFinite(Number(k.volume)))
+    .map((k) => ({ t: Number(k.t), v: Number(k.volume), easing: k.easing || 'linear' }))
+    .sort((a, b) => a.t - b.t);
+  if (!pts.length) return base;
+  if (t <= pts[0].t) return pts[0].v;
+  if (t >= pts[pts.length - 1].t) return pts[pts.length - 1].v;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (t >= a.t && t <= b.t) {
+      const p = (t - a.t) / Math.max(0.001, b.t - a.t);
+      return a.v + (b.v - a.v) * window.KFEasing.ease(p, a.easing);
+    }
+  }
+  return base;
+}
+
+function fadeGainAt(c, t) {
+  const local = t - Number(c.start || 0);
+  const dur = Math.max(0.01, Number(c.duration || 1));
+  const fi = clamp(Number(c.fadeIn) || 0, 0, dur / 2);
+  const fo = clamp(Number(c.fadeOut) || 0, 0, dur / 2);
+  let g = 1;
+  if (fi > 0 && local < fi) g *= clamp(local / fi, 0, 1);
+  if (fo > 0 && local > dur - fo) g *= clamp((dur - local) / fo, 0, 1);
+  return g;
+}
+
+function addVolumeKeyframe(c) {
+  const at = clamp(state.time, c.start, c.start + c.duration);
+  let kf = kfAt(c, at);
+  if (!kf) { kf = { t: Math.round(at * 100) / 100, ...evalKfs(c, at) }; (c.keyframes = c.keyframes || []).push(kf); }
+  kf.volume = Number(c.volume ?? 1);
+  renderAll(); commit('كي فريم للصوت'); toast('◇ اتنضاف كي فريم للصوت');
+}
 
 function addKeyframe(t) {
   if (!state.selected) { toast('اختار مقطع أول'); return; }
@@ -952,10 +1115,44 @@ function renderRuler() {
   }
 }
 
+const PEAKS_PER_SEC = 20;
+
+function clipHasAudio(c) {
+  return !!c && c.type === 'media' && c.mediaKind !== 'image' && !!c.hasAudio;
+}
+
+function requestPeaks(src) {
+  if (!src || state.peaks.has(src)) return;
+  state.peaks.set(src, null);
+  window.api?.audioPeaks?.(src).then((p) => {
+    state.peaks.set(src, Array.isArray(p) ? p : []);
+    document.querySelectorAll('canvas.waveform').forEach((cv) => {
+      if (cv.dataset.src === src) drawWaveform(cv);
+    });
+  }).catch(() => { state.peaks.set(src, []); });
+}
+
+function drawWaveform(cv) {
+  const peaks = state.peaks.get(cv.dataset.src);
+  const w = cv.width, h = cv.height;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  if (!peaks || !peaks.length || !w) return;
+  const inP = Number(cv.dataset.in) || 0;
+  const span = Math.max(0.05, (Number(cv.dataset.dur) || 1) * (Number(cv.dataset.speed) || 1));
+  ctx.fillStyle = 'rgba(255,255,255,.62)';
+  for (let x = 0; x < w; x += 2) {
+    const idx = Math.floor((inP + (x / w) * span) * PEAKS_PER_SEC);
+    const v = peaks[idx] || 0;
+    const bh = Math.max(1, Math.round(v * (h - 2)));
+    ctx.fillRect(x, Math.floor((h - bh) / 2), 1, bh);
+  }
+}
+
 function renderTracks() {
   const root = $('tracks'); root.innerHTML = '';
   state.project.tracks.forEach((track) => {
-    const row = document.createElement('div'); row.className = 'track-row';
+    const row = document.createElement('div'); row.className = 'track-row' + (track.locked ? ' locked' : '');
     const head = document.createElement('div'); head.className = 'track-head';
     const vol = track.volume ?? 1;
     head.innerHTML = `<div class="track-name">${escapeHtml(track.name)}</div><div class="track-meta">${track.clips.length} مقطع</div>
@@ -964,6 +1161,9 @@ function renderTracks() {
         <button class="mini-btn" data-act="mute" title="كتم المسار">${track.muted ? '🔇' : '🔈'}</button>
         <button class="mini-btn ${track.solo ? 'solo-on' : ''}" data-act="solo" title="عزل المسار (Solo)">S</button>
         <button class="mini-btn" data-act="hide">${track.hidden ? '◌' : '◉'}</button>
+        <button class="mini-btn ${track.locked ? 'lock-on' : ''}" data-act="lock" title="قفل/فتح المسار">${track.locked ? '🔒' : '🔓'}</button>
+        <button class="mini-btn" data-act="up" title="تحريك المسار لأعلى">▲</button>
+        <button class="mini-btn" data-act="down" title="تحريك المسار لأسفل">▼</button>
         <button class="mini-btn" data-act="del">✕</button>
       </div>`;
     const volSlider = head.querySelector('[data-vol]');
@@ -980,6 +1180,9 @@ function renderTracks() {
       if (act === 'mute') track.muted = !track.muted;
       if (act === 'solo') track.solo = !track.solo;
       if (act === 'hide') track.hidden = !track.hidden;
+      if (act === 'lock') track.locked = !track.locked;
+      if (act === 'up') { moveTrack(track, -1); return; }
+      if (act === 'down') { moveTrack(track, 1); return; }
       if (act === 'del' && state.project.tracks.length > 1) { state.project.tracks = state.project.tracks.filter((t) => t.id !== track.id); trackGains.delete(track.id); }
       updateTrackGains(); recomputeDuration(); renderAll(); commit('خصائص المسار');
     }));
@@ -988,7 +1191,8 @@ function renderTracks() {
     track.clips.forEach((c) => {
       const el = document.createElement('div');
       const kind = c.type === 'text' ? 'text' : c.type === 'transition' ? 'transition' : c.mediaKind;
-      el.className = `clip ${kind}${state.selected && state.selected.clipId === c.id ? ' selected' : ''}`;
+      el.className = `clip ${kind}${(state.selection.has(selKey(track.id, c.id)) || (state.selected && state.selected.clipId === c.id)) ? ' selected' : ''}`;
+      el.dataset.selkey = selKey(track.id, c.id);
       el.style.left = `${Number(c.start || 0) * state.pxPerSec}px`;
       el.style.width = `${Math.max(kind === 'transition' ? 34 : 14, Number(c.duration || 0) * state.pxPerSec)}px`;
       if (c.type === 'media' && c.mediaKind !== 'audio') {
@@ -999,11 +1203,24 @@ function renderTracks() {
       el.innerHTML = `<span class="clip-label">${escapeHtml(c.type === 'text' ? c.text : c.name || '')}</span>
         ${c.mask ? '<span class="mask-badge">◑</span>' : ''}${kfDots}
         ${c.type !== 'transition' ? '<span class="clip-handle left"></span><span class="clip-handle"></span>' : ''}`;
+      if (clipHasAudio(c)) {
+        const cv = document.createElement('canvas');
+        cv.className = 'waveform';
+        cv.dataset.src = c.src || '';
+        cv.dataset.in = c.inPoint || 0;
+        cv.dataset.dur = c.duration || 1;
+        cv.dataset.speed = c.speed || 1;
+        cv.width = Math.max(1, Math.round(Number(c.duration || 1) * state.pxPerSec));
+        cv.height = 44;
+        el.appendChild(cv);
+        requestPeaks(c.src);
+        drawWaveform(cv);
+      }
       el.addEventListener('pointerdown', (e) => startClipDrag(e, track, c, el));
       el.addEventListener('contextmenu', (e) => {
         e.preventDefault(); e.stopPropagation();
-        state.selected = { trackId: track.id, clipId: c.id };
-        renderInspector(); renderTracks(); showCtxMenu(e);
+        selectClip(track, c, !!(e.ctrlKey || e.metaKey), !!e.shiftKey);
+        renderTracks(); showCtxMenu(e);
       });
       lane.appendChild(el);
     });
@@ -1020,7 +1237,7 @@ function renderTracks() {
       state.selected = { trackId: track.id, clipId: clip.id };
       updatePlaybackUI(); renderAll(); commit('إضافة مقطع بالسحب'); toast(`أُضيف: ${m.name}`);
     });
-    lane.addEventListener('pointerdown', (e) => { if (e.target === lane) { state.selected = null; renderInspector(); renderTracks(); } });
+    lane.addEventListener('pointerdown', (e) => { if (e.target === lane) { clearSelection(); renderTracks(); } });
     row.appendChild(head); row.appendChild(lane); root.appendChild(row);
   });
 }
@@ -1074,10 +1291,12 @@ function insertClipWithRipple(clip, track, desiredStart, excludeId) {
 function startClipDrag(e, track, clip, el) {
   if (e.button !== 0) return;
   e.preventDefault(); e.stopPropagation();
-  state.selected = { trackId: track.id, clipId: clip.id };
-  renderInspector();
-  document.querySelectorAll('.clip.selected').forEach((n) => n.classList.remove('selected'));
-  el.classList.add('selected');
+  if (e.shiftKey || e.ctrlKey || e.metaKey) {
+    selectClip(track, clip, !!(e.ctrlKey || e.metaKey), !!e.shiftKey);
+    return;
+  }
+  if (track.locked) { toast('المسار مقفول — افتحه من زر 🔓'); return; }
+  selectClip(track, clip, false, false);
   el.classList.add('dragging');
 
   const hit = e.target.classList;
@@ -1169,10 +1388,23 @@ function renderMotionInspector(c) {
     ${slider('kf_rot', 'دوران', -180, 180, 1, cur.rotation)}
     ${slider('kf_op', 'شفافية', 0, 1, 0.01, cur.opacity)}
     <div class="section-title">النقاط المفتاحية (${(c.keyframes || []).length})</div>
-    <div class="kf-list">${sortedKfs(c).map((k, i) => `<div class="kf-item"><span>${fmtTime(k.t).slice(3)}</span><button class="mini-btn" data-kfdel="${i}">✕</button></div>`).join('') || '<div class="inspector-sub">ما فيش نقاط — اضغط «إضافة نقطة»</div>'}</div>`;
+    <div class="kf-list">${sortedKfs(c).map((k, i) => `<div class="kf-item">
+      <span class="kf-time" data-kfgo="${i}" title="اذهب للنقطة">${fmtTime(k.t).slice(3)}</span>
+      <select class="kf-easing" data-kfeasing="${i}" title="منحنى الانتقال من النقطة دي لللي بعدها">
+        ${window.KFEasing.EASINGS.map((e) => `<option value="${e}" ${(k.easing || 'linear') === e ? 'selected' : ''}>${window.KFEasing.EASING_LABELS[e]}</option>`).join('')}
+      </select>
+      <button class="mini-btn" data-kfdel="${i}">✕</button>
+    </div>`).join('') || '<div class="inspector-sub">ما فيش نقاط — اضغط «إضافة نقطة»</div>'}</div>`;
 
   $('kfAdd').addEventListener('click', () => addKeyframe(state.time));
   document.querySelectorAll('[data-an]').forEach((el) => el.addEventListener('click', () => applyAnimPreset(el.dataset.an)));
+  document.querySelectorAll('[data-kfgo]').forEach((el) => el.addEventListener('click', () => {
+    const k = sortedKfs(c)[Number(el.dataset.kfgo)]; if (k) setTime(k.t);
+  }));
+  document.querySelectorAll('[data-kfeasing]').forEach((el) => el.addEventListener('change', (e) => {
+    const k = sortedKfs(c)[Number(el.dataset.kfeasing)];
+    if (k) { k.easing = e.target.value; drawPreview(); commit('منحنى كي فريم'); }
+  }));
   document.querySelectorAll('[data-kfdel]').forEach((el) => el.addEventListener('click', () => {
     const idx = Number(el.dataset.kfdel); const k = sortedKfs(c)[idx];
     c.keyframes = (c.keyframes || []).filter((x) => x !== k); renderAll(); commit('حذف نقطة مفتاحية');
@@ -1257,7 +1489,9 @@ function renderInspector() {
     <div class="field-row"><div class="field"><label>البداية (ث)</label><input type="number" id="f_start" min="0" step="0.01" value="${c.start}" /></div>
     <div class="field"><label>المدة (ث)</label><input type="number" id="f_dur" min="0.1" step="0.01" value="${c.duration}" /></div></div>
     <div class="field"><label>نقطة الدخول (ث)</label><input type="number" id="f_in" min="0" step="0.01" value="${c.inPoint || 0}" /></div>
-    <div class="field"><label>الصوت</label><input type="range" id="f_vol" min="0" max="2" step="0.05" value="${c.volume ?? 1}" /></div>
+    ${clipHasAudio(c) ? `<div class="field"><label>الصوت <button class="kf-mini" id="kfVol" title="كي فريم لمستوى الصوت">◇</button></label><input type="range" id="f_vol" min="0" max="2" step="0.05" value="${c.volume ?? 1}" /></div>
+    <div class="field-row"><div class="field"><label>تلاشي الدخول (ث)</label><input type="number" id="f_fadein" min="0" max="${Math.round(c.duration / 2)}" step="0.05" value="${c.fadeIn || 0}" /></div>
+      <div class="field"><label>تلاشي الخروج (ث)</label><input type="number" id="f_fadeout" min="0" max="${Math.round(c.duration / 2)}" step="0.05" value="${c.fadeOut || 0}" /></div></div>` : ''}
     <div class="section-title">السرعة والماسك</div>
     <div class="field-row"><div class="field"><label>السرعة ×</label><input type="number" id="f_speed" min="0.25" max="4" step="0.05" value="${c.speed || 1}" /></div>
       <div class="field"><label>حجم الماسك</label><input type="number" id="f_mscale" min="0.4" max="1.6" step="0.05" value="${c.maskScale || 1}" /></div></div>
@@ -1293,8 +1527,14 @@ function renderInspector() {
   $('f_start').addEventListener('input', (e) => { c.start = Math.max(0, Number(e.target.value)); refreshTimings(); drawPreview(); commitSoon('توقيت مقطع'); });
   $('f_dur').addEventListener('input', (e) => { c.duration = Math.max(0.1, Number(e.target.value)); refreshTimings(); drawPreview(); commitSoon('توقيت مقطع'); });
   $('f_in').addEventListener('input', (e) => { c.inPoint = Math.max(0, Number(e.target.value)); drawPreview(); commitSoon('نقطة دخول'); });
-  $('f_vol').addEventListener('input', (e) => { c.volume = Number(e.target.value); commitSoon('صوت مقطع'); });
-  ['f_start', 'f_dur', 'f_in', 'f_vol'].forEach((id) => $(id).addEventListener('change', () => commit('خصائص مقطع')));
+  $('f_vol')?.addEventListener('input', (e) => { c.volume = Number(e.target.value); commitSoon('صوت مقطع'); });
+  ['f_start', 'f_dur', 'f_in', 'f_vol'].forEach((id) => $(id)?.addEventListener('change', () => commit('خصائص مقطع')));
+  [['f_fadein', 'fadeIn'], ['f_fadeout', 'fadeOut']].forEach(([id, key]) => {
+    const el = $(id); if (!el) return;
+    el.addEventListener('input', (e) => { c[key] = clamp(Number(e.target.value) || 0, 0, c.duration / 2); commitSoon('تلاشي صوت'); });
+    el.addEventListener('change', () => commit('تلاشي صوت'));
+  });
+  $('kfVol')?.addEventListener('click', () => addVolumeKeyframe(c));
   const setSpeed = (v) => {
     c.speed = clamp(Number(v) || 1, 0.25, 4);
     if (c.mediaKind !== 'image') c.duration = Math.max(0.1, Math.round(((c.sourceDuration || 5) / c.speed) * 100) / 100);
@@ -1392,11 +1632,12 @@ function syncAudio(t, all) {
     const tr = getTrack(c._track.id);
     const audible = !tr.muted && (!anySolo || tr.solo);
     const shouldHear = c.hasAudio && audible;
+    const level = clamp(volumeAt(c, t) * fadeGainAt(c, t), 0, 2);
     if (el._kcConnected && el._kcClipGain && audioCtx) {
-      el._kcClipGain.gain.setTargetAtTime(shouldHear ? clamp(Number(c.volume ?? 1), 0, 2) : 0, audioCtx.currentTime, 0.02);
+      el._kcClipGain.gain.setTargetAtTime(shouldHear ? level : 0, audioCtx.currentTime, 0.02);
     } else {
       const trVol = audioCtx ? 1 : (tr.volume ?? 1);
-      el.volume = clamp(Number(c.volume ?? 1) * trVol, 0, 2);
+      el.volume = clamp(level * trVol, 0, 2);
       el.muted = !shouldHear || !state.playing;
     }
     if (state.playing) {
@@ -1700,6 +1941,10 @@ ctxMenu.addEventListener('click', (e) => {
   if (act === 'segGeneral') applySegmentation('general');
   if (act === 'segPerson') applySegmentation('person');
   if (act === 'segClear') clearSegmentation(targetVisualClip());
+  if (act === 'duplicate') duplicateSelected();
+  if (act === 'copy') copySelected();
+  if (act === 'paste') pasteClips();
+  if (act === 'rippleDelete') deleteSelected(true);
 });
 document.addEventListener('click', (e) => { if (!ctxMenu.contains(e.target)) ctxMenu.classList.remove('show'); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ctxMenu.classList.remove('show'); });
@@ -1736,14 +1981,14 @@ $('addAudioTrack').addEventListener('click', () => {
 });
 
 $('newBtn').addEventListener('click', () => {
-  state.project.tracks.forEach((t) => { t.clips = []; }); state.media = []; state.selected = null; state.time = 0;
+  state.project.tracks.forEach((t) => { t.clips = []; }); state.media = []; state.selected = null; state.selection.clear(); state.anchorSel = null; state.time = 0;
   recomputeDuration(); renderAll(); commit('مشروع جديد'); toast('مشروع جديد');
 });
 function loadProject(p) {
   state.project = p;
   state.project.filter = state.project.filter || 'none';
   state.project.adjust = { bright: 0, contrast: 0, sat: 0, temp: 0, ...(p.adjust || {}) };
-  state.selected = null; state.time = 0;
+  state.selected = null; state.selection.clear(); state.anchorSel = null; state.time = 0;
   if (state.playing) togglePlay();
   recomputeDuration(); syncAdjustInputs(); highlightFilter(); renderAll();
   window.KCHistory.reset(state.project, 'فتح مشروع'); updateHistoryUI();
@@ -1821,11 +2066,18 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (cmd && e.code === 'KeyY') { e.preventDefault(); if (!isTypingTarget(document.activeElement)) redo(); return; }
-  if (isTypingTarget(document.activeElement)) return;
+  const typing = isTypingTarget(document.activeElement);
+  if (cmd && !typing) {
+    if (e.code === 'KeyC') { e.preventDefault(); copySelected(); return; }
+    if (e.code === 'KeyV') { e.preventDefault(); pasteClips(); return; }
+    if (e.code === 'KeyD') { e.preventDefault(); duplicateSelected(); return; }
+    if (e.code === 'KeyA') { e.preventDefault(); selectAll(); return; }
+  }
+  if (typing) return;
   const mod = e.ctrlKey || e.metaKey || e.altKey;
   if (mod) return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-  if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(e.shiftKey); }
   if (e.code === 'KeyS') { e.preventDefault(); splitSelected(); }
   if (e.code === 'KeyF') freezeFrame();
   if (e.code === 'KeyM') toggleMirror('h');

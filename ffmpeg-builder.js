@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
+const { kfExpression } = require('./kf-easing');
 
 const APP_DIR = __dirname;
 function resolveBin(name) {
@@ -197,19 +198,7 @@ function maskSegments(c) {
 
 function num(v, digits = 3) { return Number(v || 0).toFixed(digits); }
 
-function kfExpr(kfs, prop, fallback, timeOffset = 0) {
-  const pts = kfs.filter((k) => k[prop] != null && Number.isFinite(Number(k[prop])))
-    .map((k) => ({ t: Number(k.t), v: Number(k[prop]) }))
-    .sort((a, b) => a.t - b.t);
-  if (!pts.length) return num(fallback, 4);
-  const tv = timeOffset ? `(t+${num(timeOffset)})` : 't';
-  let expr = `if(lt(${tv},${num(pts[0].t)}),${num(pts[0].v, 4)},`;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    expr += `if(lt(${tv},${num(b.t)}),${num(a.v, 4)}+(${num(b.v, 4)}-${num(a.v, 4)})*(${tv}-${num(a.t)})/${num(Math.max(0.001, b.t - a.t))},`;
-  }
-  return (expr + num(pts[pts.length - 1].v, 4) + ')'.repeat(pts.length)).replace(/,/g, '\\,');
-}
+const kfExpr = kfExpression;
 
 function atempoFor(speed) {
   let s = clampNum(speed, 0.25, 4);
@@ -422,12 +411,22 @@ function buildFfmpegArgs(project, outputPath) {
       const speed = clampNum(c.speed || 1, 0.25, 4);
       const srcDur = Math.max(0.01, Number(c.duration || 0.1)) * speed;
       const delay = Math.max(0, Math.round(Number(c.start || 0) * 1000));
-      const vol = Number(c.volume ?? 1);
       const label = `a${n}`;
-      filters.push(
-        `[${c._input}:a]atrim=start=${inP.toFixed(3)}:end=${(inP + srcDur).toFixed(3)},asetpts=PTS-STARTPTS,` +
-        `volume=${vol},${atempoFor(speed)},adelay=${delay}|${delay}[${label}]`
-      );
+      const chain = [
+        `[${c._input}:a]atrim=start=${inP.toFixed(3)}:end=${(inP + srcDur).toFixed(3)}`,
+        'asetpts=PTS-STARTPTS',
+        atempoFor(speed),
+      ];
+      const fi = clampNum(c.fadeIn || 0, 0, Number(c.duration || 1) / 2);
+      const fo = clampNum(c.fadeOut || 0, 0, Number(c.duration || 1) / 2);
+      if (fi > 0.001) chain.push(`afade=t=in:st=0:d=${fi.toFixed(3)}`);
+      if (fo > 0.001) chain.push(`afade=t=out:st=${Math.max(0, Number(c.duration) - fo).toFixed(3)}:d=${fo.toFixed(3)}`);
+      const hasVolKfs = (c.keyframes || []).some((k) => k.volume != null && Number.isFinite(Number(k.volume)));
+      if (hasVolKfs || Math.abs(Number(c.volume ?? 1) - 1) > 0.001) {
+        chain.push(`volume=eval=frame:volume=${kfExpr(c.keyframes, 'volume', c.volume ?? 1, Number(c.start || 0))}`);
+      }
+      chain.push(`adelay=${delay}|${delay}[${label}]`);
+      filters.push(chain.join(','));
     });
     const labels = audioClips.map((_, n) => `[a${n}]`).join('');
     filters.push(`${labels}amix=inputs=${audioClips.length}:duration=longest:normalize=0[aout]`);
@@ -445,6 +444,37 @@ function buildFfmpegArgs(project, outputPath) {
     outputPath
   );
   return args;
+}
+
+// Decode audio to 8 kHz mono PCM and reduce it to one 0..1 peak per bucket.
+// Cheap enough to cache per source file in the renderer.
+function extractAudioPeaks(src, pps = 20) {
+  const rate = 8000;
+  const perBucket = Math.max(1, Math.round(rate / Math.max(1, Number(pps) || 20)));
+  return new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG, [
+      '-hide_banner', '-loglevel', 'error', '-i', src,
+      '-vn', '-ac', '1', '-ar', String(rate), '-f', 's16le', '-',
+    ], { cwd: APP_DIR, windowsHide: true });
+    const chunks = [];
+    let err = '';
+    proc.stdout.on('data', (c) => chunks.push(c));
+    proc.stderr.on('data', (b) => { err = (err + b.toString()).slice(-2000); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) { reject(new Error(`audio peaks (${code}): ${err}`)); return; }
+      const buf = Buffer.concat(chunks);
+      const samples = Math.floor(buf.length / 2);
+      const count = Math.ceil(samples / perBucket);
+      const peaks = new Array(count).fill(0);
+      for (let i = 0; i < samples; i++) {
+        const v = Math.abs(buf.readInt16LE(i * 2)) / 32768;
+        const b = Math.floor(i / perBucket);
+        if (v > peaks[b]) peaks[b] = v;
+      }
+      resolve(peaks.map((v) => Math.round(v * 1000) / 1000));
+    });
+  });
 }
 
 function grabFrame(filePath, time, outPath) {
@@ -545,5 +575,5 @@ async function segmentMatte(opts) {
 
 module.exports = {
   APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb,
-  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs, colorGradeFilter,
+  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs, colorGradeFilter, extractAudioPeaks,
 };

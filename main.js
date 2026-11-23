@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs } = require('./ffmpeg-builder');
+const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs, extractAudioPeaks } = require('./ffmpeg-builder');
 const { normalizeProject, denormalizeProject } = require('./project-paths');
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -181,6 +181,20 @@ ipcMain.handle('export:cancel', async (_, id) => {
   cancelled.add(id);
   killProcesses(running.exports.get(id));
   return true;
+});
+
+const peakCache = new Map();
+ipcMain.handle('audio:peaks', async (_, src) => {
+  const abs = resolveAsset(src);
+  if (!abs || !fs.existsSync(abs)) return [];
+  if (peakCache.has(abs)) return peakCache.get(abs);
+  try {
+    const peaks = await extractAudioPeaks(abs, 20);
+    peakCache.set(abs, peaks);
+    return peaks;
+  } catch (e) {
+    return [];
+  }
 });
 
 ipcMain.handle('frame:save', async (_, dataUrl) => {

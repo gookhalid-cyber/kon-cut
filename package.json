@@ -10,7 +10,8 @@
     "test:history": "node test-history.js",
     "test:filters": "node test-export-filters.js",
     "test:paths": "node test-project-paths.js",
-    "test:all": "node test-history.js && node test-project-paths.js && node test-export-filters.js && node test-export.js && node test-segment.js"
+    "test:audio": "node test-audio.js",
+    "test:all": "node test-history.js && node test-project-paths.js && node test-export-filters.js && node test-audio.js && node test-export.js && node test-segment.js"
   },
   "devDependencies": {
     "electron": "^40.0.0"
