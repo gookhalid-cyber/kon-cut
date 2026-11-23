@@ -2,6 +2,7 @@
   "name": "kon-cut",
   "version": "0.2.0",
   "description": "Kon Cut - original desktop video editor inspired by the best open-source editors",
+  "author": "Kon Cut",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -55,27 +56,20 @@
     ],
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "artifactName": "${productName}-${version}.${ext}"
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
     }
   }
 }
