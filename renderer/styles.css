@@ -55,6 +55,9 @@ button { cursor: pointer; }
 .btn-plain { background: transparent; border-color: transparent; color: #c6c6d0; }
 .btn-plain:hover { background: var(--bg3); }
 .btn-export { background: linear-gradient(135deg, #47a8ff, #6f6bff); border: none; color: white; padding: 6px 20px; }
+.hist-btn { padding: 6px 11px; font-size: 15px; line-height: 1; }
+.hist-btn:disabled { opacity: .35; cursor: default; }
+.hist-btn:disabled:hover { background: transparent; }
 
 /* ---------- main layout ---------- */
 .main-body { flex: 1 1 auto; display: flex; min-height: 0; }
@@ -285,3 +288,7 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
 .progress-track { height: 8px; background: #151518; border-radius: 8px; overflow: hidden; }
 .progress-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .2s; }
 .progress-text { color: var(--dim); font-size: 11px; }
+.modal-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0; font-size: 11px; }
+.modal-field label { color: var(--dim); }
+.modal-field select { flex: 1; background: var(--bg3); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+.modal-actions { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }

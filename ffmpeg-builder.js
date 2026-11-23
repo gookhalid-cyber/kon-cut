@@ -26,7 +26,7 @@ function resolvePython() {
   for (const p of candidates) {
     try {
       if (p === 'python' || fs.existsSync(p)) {
-        execFileSync(p, ['-c', 'import rembg,PIL'], { stdio: 'ignore', timeout: 8000 });
+        execFileSync(p, ['-c', 'import rembg,PIL'], { stdio: 'ignore', timeout: 20000 });
         return p;
       }
     } catch (e) { /* try next */ }
@@ -220,6 +220,39 @@ function atempoFor(speed) {
   return parts.join(',');
 }
 
+const CSS_FILTER_FFMPEG = {
+  'none': '',
+  'sepia(0.35) saturate(1.2)': 'colorchannelmixer=rr=1.08:gg=1.00:bb=0.86,eq=saturation=1.2',
+  'grayscale(1)': 'hue=s=0',
+  'contrast(1.4) saturate(1.2)': 'eq=contrast=1.4:saturation=1.2',
+  'hue-rotate(180deg) saturate(0.8)': 'hue=h=180:s=0.8',
+  'blur(1px) brightness(1.1)': 'gblur=sigma=1,eq=brightness=0.05',
+};
+
+function colorGradeFilter(project) {
+  const parts = [];
+  const preset = CSS_FILTER_FFMPEG[project.filter || 'none'];
+  if (preset) parts.push(preset);
+  const a = project.adjust || {};
+  const bright = (Number(a.bright) || 0) / 300;
+  const contrast = 1 + (Number(a.contrast) || 0) / 100;
+  const sat = 1 + (Number(a.sat) || 0) / 100;
+  if (Math.abs(bright) > 0.0001 || Math.abs(contrast - 1) > 0.0001 || Math.abs(sat - 1) > 0.0001) {
+    parts.push(
+      `eq=brightness=${clampNum(bright, -0.5, 0.5).toFixed(3)}:` +
+      `contrast=${clampNum(contrast, 0.5, 2).toFixed(3)}:` +
+      `saturation=${clampNum(sat, 0, 2).toFixed(3)}`
+    );
+  }
+  const temp = Number(a.temp) || 0;
+  if (Math.abs(temp) > 0.0001) {
+    const r = clampNum(1 + temp / 400, 0.5, 1.5);
+    const b = clampNum(1 - temp / 400, 0.5, 1.5);
+    parts.push(`colorchannelmixer=rr=${r.toFixed(3)}:bb=${b.toFixed(3)}`);
+  }
+  return parts.filter(Boolean).join(',');
+}
+
 function buildFfmpegArgs(project, outputPath) {
   const W = project.width || 1920;
   const H = project.height || 1080;
@@ -371,6 +404,9 @@ function buildFfmpegArgs(project, outputPath) {
     lastV = `to${n}`;
   });
 
+  const grade = colorGradeFilter(project);
+  if (grade) { filters.push(`[${lastV}]${grade}[graded]`); lastV = 'graded'; }
+
   if (textClips.length) {
     const assPath = buildAss(project, textClips);
     filters.push(`[${lastV}]ass=f=${assPath}:fontsdir=assets/fonts[vo_text]`);
@@ -402,7 +438,7 @@ function buildFfmpegArgs(project, outputPath) {
   const args = ['-hide_banner', '-y', ...inputArgs, '-filter_complex', filters.join(';')];
   args.push('-map', `[${lastV}]`, '-map', '[aout]');
   args.push(
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-c:v', 'libx264', '-preset', project.preset || 'veryfast', '-crf', String(Math.round(clampNum(project.crf || 23, 0, 51))),
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
     '-t', duration.toFixed(3), '-movflags', '+faststart',
     '-progress', 'pipe:1', '-nostats',
@@ -449,7 +485,7 @@ async function segmentMatte(opts) {
   const {
     src, out, mode = 'general', image = false,
     start = 0, duration = 1, fps = 30,
-    width = 1280, height = 720, onProgress,
+    width = 1280, height = 720, onProgress, onProcess,
   } = opts;
   if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
   const python = resolvePython();
@@ -457,9 +493,11 @@ async function segmentMatte(opts) {
   const baseArgs = ['-u', REMBG_SCRIPT, '--model', model, '--width', Math.round(width), '--height', Math.round(height)];
 
   if (image) {
-    execFileSync(python, [...baseArgs, '--image', src, '--output', out], {
-      cwd: APP_DIR, windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 3 * 60 * 1000,
-    });
+    const py = spawn(python, [...baseArgs, '--image', src, '--output', out], { cwd: APP_DIR, windowsHide: true });
+    const err = { value: '' };
+    py.stderr.on('data', (b) => { err.value = (err.value + b.toString()).slice(-4000); });
+    if (onProcess) onProcess([py]);
+    await procDone(py, 'rembg image', err);
     if (onProgress) onProgress(100);
     return out;
   }
@@ -481,6 +519,7 @@ async function segmentMatte(opts) {
     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'gray',
     '-movflags', '+faststart', out,
   ], { cwd: APP_DIR, windowsHide: true });
+  if (onProcess) onProcess([dec, py, enc]);
 
   dec.stderr.on('data', (b) => { decErr.value = (decErr.value + b.toString()).slice(-4000); });
   py.stderr.on('data', (b) => { pyErr.value = (pyErr.value + b.toString()).slice(-4000); });
@@ -506,5 +545,5 @@ async function segmentMatte(opts) {
 
 module.exports = {
   APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb,
-  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs,
+  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs, colorGradeFilter,
 };

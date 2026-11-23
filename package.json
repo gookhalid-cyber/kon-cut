@@ -6,7 +6,11 @@
   "scripts": {
     "start": "electron .",
     "test:export": "node test-export.js",
-    "test:segment": "node test-segment.js"
+    "test:segment": "node test-segment.js",
+    "test:history": "node test-history.js",
+    "test:filters": "node test-export-filters.js",
+    "test:paths": "node test-project-paths.js",
+    "test:all": "node test-history.js && node test-project-paths.js && node test-export-filters.js && node test-export.js && node test-segment.js"
   },
   "devDependencies": {
     "electron": "^40.0.0"

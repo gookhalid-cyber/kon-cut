@@ -16,8 +16,11 @@
   <div class="project-title" id="projectTitle">مشروع جديد <span>· 16:9 · 30fps</span></div>
   <div class="top-actions">
     <button class="btn btn-import" id="importBtn">＋ استيراد</button>
+    <button class="btn btn-plain hist-btn" id="undoBtn" title="تراجع (Ctrl+Z)">↶</button>
+    <button class="btn btn-plain hist-btn" id="redoBtn" title="إعادة (Ctrl+Y)">↷</button>
     <button class="btn btn-plain" id="saveBtn">حفظ</button>
     <button class="btn btn-plain" id="openBtn">فتح</button>
+    <button class="btn btn-plain" id="backupBtn" title="فتح النسخة الاحتياطية">نسخة احتياطية</button>
     <button class="btn btn-plain" id="newBtn">جديد</button>
     <button class="btn btn-export" id="exportBtn">تصدير</button>
   </div>
@@ -92,7 +95,7 @@
         <label>التشبع <input type="range" id="adjSat" min="-100" max="100" value="0" /></label>
         <label>الحرارة <input type="range" id="adjTemp" min="-100" max="100" value="0" /></label>
       </div>
-      <div class="hint">الضبط هيطبّق على التصدير في المرحلة القادمة</div>
+      <div class="hint">الضبط والفلاتر بيطبّقوا على المعاينة والتصدير، ومحفوظين في المشروع.</div>
     </div>
   </aside>
 
@@ -134,7 +137,7 @@
     <div class="shortcuts">
       <span><kbd>Space</kbd> تشغيل</span><span><kbd>S</kbd> تقسيم</span><span><kbd>F</kbd> تجميد</span>
       <span><kbd>M</kbd> مرآة</span><span><kbd>R</kbd> عكس</span>
-      <span><kbd>Del</kbd> حذف</span><span><kbd>Ctrl+S</kbd> حفظ</span>
+      <span><kbd>Del</kbd> حذف</span><span><kbd>Ctrl+Z</kbd> تراجع</span><span><kbd>Ctrl+Y</kbd> إعادة</span><span><kbd>Ctrl+S</kbd> حفظ</span>
     </div>
   </main>
 
@@ -196,13 +199,37 @@
 
 <div class="modal-backdrop" id="exportModal">
   <div class="modal">
-    <h3 id="progressTitle">جاري التصدير…</h3>
-    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-    <p class="progress-text" id="progressText">0%</p>
+    <h3 id="progressTitle">إعدادات التصدير</h3>
+    <div id="exportSetup">
+      <div class="modal-field"><label>الدقة</label>
+        <select id="expRes">
+          <option value="1920x1080">1920 × 1080 (أفقي)</option>
+          <option value="1280x720">1280 × 720 (أفقي)</option>
+          <option value="1080x1920">1080 × 1920 (عمودي)</option>
+          <option value="1080x1080">1080 × 1080 (مربع)</option>
+        </select>
+      </div>
+      <div class="modal-field"><label>معدل الإطارات</label>
+        <select id="expFps"><option>24</option><option>25</option><option selected>30</option><option>60</option></select>
+      </div>
+      <div class="modal-field"><label>الجودة</label>
+        <select id="expQuality"><option value="18">عالية (CRF 18)</option><option value="23" selected>متوازنة (CRF 23)</option><option value="28">حجم أصغر (CRF 28)</option></select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-export" id="exportStartBtn">ابدأ التصدير</button>
+        <button class="btn btn-plain" id="exportCancelBtn">إلغاء</button>
+      </div>
+    </div>
+    <div id="exportProgressBox" class="hidden">
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <p class="progress-text" id="progressText">0%</p>
+      <div class="modal-actions"><button class="btn btn-plain" id="progressCancelBtn">إلغاء العملية</button></div>
+    </div>
   </div>
 </div>
 
 <input type="file" id="hiddenFile" accept="video/*,audio/*,image/*" multiple hidden />
+<script src="history.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
