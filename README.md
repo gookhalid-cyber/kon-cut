@@ -98,5 +98,9 @@ Chroma key، تثبيت صوت متقدم، Lottie، وتحرير متعدد ا�
   npm run test:all
   ```
   بتشغّل كل اختبارات الوحدة (history / paths / filters / audio / export / segment / AI) وبعدين `test-ui.mjs` — اختبار CDP لواجهة Electron على profile منفصل.
+- اختبار النسخة المغلّفة نفسها (بعد `npm run dist` أو `dist:full`) بيفحص إن FFmpeg والنماذج والترجمة شغّالين من `resources\` من غير نت:
+  ```bat
+  npm run test:packaged
+  ```
 - الأصول المولّدة (إطار مجمد، مقطع معكوس، matte عزل) بتتنقل تلقائياً لمجلد `<اسم المشروع>_assets` جنب ملف `.montaj`، والمسارات بتتخزّن نسبية عشان المشروع يفتح على أي جهاز.
 - المشروع على GitHub باسم **Kon Cut** (المستودع: `kon-cut`).

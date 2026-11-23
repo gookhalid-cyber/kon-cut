@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs, extractAudioPeaks, makeProxy,
+const { APP_DIR, FFMPEG, TEMP_DIR, resource, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs, extractAudioPeaks, makeProxy,
   detectScenes, detectSilence, transcribeAudio } = require('./ffmpeg-builder');
 const { normalizeProject, denormalizeProject } = require('./project-paths');
 
@@ -30,7 +30,7 @@ ipcMain.handle('app:runtime', () => ({
   ffmpeg: FFMPEG,
   ffmpegReady: fs.existsSync(FFMPEG),
   appDir: APP_DIR,
-  models: path.join(APP_DIR, 'runtime', 'models'),
+  models: resource('runtime', 'models'),
   packaged: !!app.isPackaged,
 }));
 

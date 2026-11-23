@@ -15,6 +15,7 @@
     "test:ui": "node test-ui.mjs",
     "test:ai": "node test-ai.js",
     "test:all": "node test-history.js && node test-project-paths.js && node test-export-filters.js && node test-audio.js && node test-export.js && node test-segment.js && node test-ai.js && node test-ui.mjs",
+    "test:packaged": "node test-packaged.mjs",
     "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "dist": "electron-builder --win",
     "dist:full": "npm run prepare:runtime && npm run dist"
@@ -34,6 +35,8 @@
       "**/*",
       "!temp/**",
       "!dist/**",
+      "!bin/**",
+      "!runtime/**",
       "!test-*.js",
       "!test-*.mjs",
       "!scripts/**"

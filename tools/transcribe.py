@@ -5,7 +5,28 @@ import json
 import os
 import sys
 
-from faster_whisper import WhisperModel
+import av
+
+# faster-whisper passes metadata_errors= to av.open(), but PyAV 19+ removed
+# that keyword. The WAV we feed it is produced locally by FFmpeg and has no
+# broken metadata, so dropping the argument is safe on newer PyAV releases.
+_orig_av_open = av.open
+
+
+def _compat_av_open(*args, **kwargs):
+    if "metadata_errors" in kwargs:
+        try:
+            return _orig_av_open(*args, **kwargs)
+        except TypeError as exc:
+            if "metadata_errors" not in str(exc):
+                raise
+            kwargs.pop("metadata_errors")
+    return _orig_av_open(*args, **kwargs)
+
+
+av.open = _compat_av_open
+
+from faster_whisper import WhisperModel  # noqa: E402  (patch must come first)
 
 
 def main():

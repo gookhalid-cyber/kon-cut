@@ -536,11 +536,17 @@ function transcribeAudio(src) {
   ], { cwd: APP_DIR, windowsHide: true });
   const python = resolvePython('faster_whisper');
   const modelsDir = process.env.KONCUT_MODELS_DIR || resource('runtime', 'models', 'whisper');
+  // When the model is bundled, stay strictly offline — never phone home to HF.
+  const bundled = fs.existsSync(path.join(modelsDir, 'models--Systran--faster-whisper-small'));
+  const pyEnv = { ...process.env, KONCUT_MODELS_DIR: modelsDir };
+  if (bundled) {
+    pyEnv.HF_HUB_OFFLINE = '1';
+    pyEnv.HF_HUB_DISABLE_SYMLINKS_WARNING = '1';
+  }
   return new Promise((resolve, reject) => {
     const proc = spawn(python, ['-u', resource('tools', 'transcribe.py'), wav,
       '--model', process.env.KONCUT_WHISPER_MODEL || 'small'], {
-      cwd: APP_DIR, windowsHide: true,
-      env: { ...process.env, KONCUT_MODELS_DIR: modelsDir },
+      cwd: APP_DIR, windowsHide: true, env: pyEnv,
     });
     let out = '', err = '';
     proc.stdout.on('data', (b) => { out += b.toString(); });
@@ -645,10 +651,11 @@ async function segmentMatte(opts) {
   if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
   const python = resolvePython();
   const model = mode === 'person' ? 'u2net_human_seg' : 'isnet-general-use';
+  const pyEnv = { ...process.env, U2NET_HOME: resource('runtime', 'models', 'rembg') };
   const baseArgs = ['-u', REMBG_SCRIPT, '--model', model, '--width', Math.round(width), '--height', Math.round(height)];
 
   if (image) {
-    const py = spawn(python, [...baseArgs, '--image', src, '--output', out], { cwd: APP_DIR, windowsHide: true });
+    const py = spawn(python, [...baseArgs, '--image', src, '--output', out], { cwd: APP_DIR, windowsHide: true, env: pyEnv });
     const err = { value: '' };
     py.stderr.on('data', (b) => { err.value = (err.value + b.toString()).slice(-4000); });
     if (onProcess) onProcess([py]);
@@ -666,7 +673,7 @@ async function segmentMatte(opts) {
       `pad=${Math.round(width)}:${Math.round(height)}:(ow-iw)/2:(oh-ih)/2,format=rgb24`,
     '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
   ], { cwd: APP_DIR, windowsHide: true });
-  const py = spawn(python, baseArgs, { cwd: APP_DIR, windowsHide: true });
+  const py = spawn(python, baseArgs, { cwd: APP_DIR, windowsHide: true, env: pyEnv });
   const enc = spawn(FFMPEG, [
     '-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', `${Math.round(width)}x${Math.round(height)}`,
@@ -699,7 +706,7 @@ async function segmentMatte(opts) {
 }
 
 module.exports = {
-  APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb,
+  APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, resource, probeFile, makeThumb,
   grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs, colorGradeFilter, extractAudioPeaks, makeProxy,
   detectScenes, detectSilence, transcribeAudio,
 };
