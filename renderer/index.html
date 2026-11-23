@@ -38,6 +38,7 @@
     <button class="rail-btn" data-tab="filters"><span class="ri">◐</span><small>فلاتر</small></button>
     <button class="rail-btn" data-tab="masks"><span class="ri">⬭</span><small>ماسكات</small></button>
     <button class="rail-btn" data-tab="adjust"><span class="ri">☷</span><small>ضبط</small></button>
+    <button class="rail-btn" data-tab="tools" id="toolsBtn"><span class="ri">✧</span><small>أدوات</small></button>
   </nav>
 
   <aside class="side-panel">
@@ -96,6 +97,21 @@
         <label>الحرارة <input type="range" id="adjTemp" min="-100" max="100" value="0" /></label>
       </div>
       <div class="hint">الضبط والفلاتر بيطبّقوا على المعاينة والتصدير، ومحفوظين في المشروع.</div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-tools">
+      <div class="section-label">كشف تلقائي</div>
+      <button class="wide-btn" id="detectScenesBtn">🎬 كشف تغيّر المشاهد</button>
+      <button class="wide-btn" id="splitScenesBtn">✂ تقسيم عند القطعات</button>
+      <button class="wide-btn" id="detectSilenceBtn">🔇 كشف الصمت</button>
+      <button class="wide-btn" id="removeSilenceBtn">🗑 حذف الصمت (مع دفع)</button>
+      <div id="detectResults" class="detect-results">ما فيش نتائج لسه</div>
+      <div class="section-label">ترجمة محلية</div>
+      <button class="wide-btn" id="transcribeBtn">🌙 استخراج نص عربي من المقطع المحدد</button>
+      <div class="hint">النص بيتولّد محلياً من نموذج Whisper محزّم، ويترجم لتقطيعات نص على مسار النصوص.</div>
+      <div class="section-label">تشخيص</div>
+      <button class="wide-btn" id="copyReportBtn">🐞 نسخ تقرير الأخطاء</button>
+      <div class="hint" id="runtimeStatus">—</div>
     </div>
   </aside>
 

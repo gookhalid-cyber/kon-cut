@@ -89,6 +89,7 @@ const state = {
     ],
   },
   media: [], selected: null, selection: new Set(), anchorSel: null, clipboard: [], peaks: new Map(),
+  markers: [], proxies: new Map(), proxyPending: new Set(), silences: [],
   time: 0, playing: false,
   zoom: 70, pxPerSec: 70, snap: true,
   activeTab: 'media', inspectorTab: 'basic',
@@ -112,6 +113,7 @@ function updateHistoryUI() {
 function commit(label = 'تعديل') {
   if (commitTimer) { clearTimeout(commitTimer); commitTimer = null; }
   window.KCHistory?.commit(state.project, label);
+  clearFrameCache();
   updateHistoryUI(); scheduleAutosave();
 }
 
@@ -200,16 +202,23 @@ function getTrackGain(trackId) {
   return trackGains.get(trackId);
 }
 
-function connectElementToAudio(el, trackId) {
+function connectElementToAudio(el, trackId, clip) {
   if (!audioCtx || el._kcConnected) return;
   try {
     const src = audioCtx.createMediaElementSource(el);
     const clipGain = audioCtx.createGain();
     clipGain.gain.value = 1;
-    src.connect(clipGain);
-    clipGain.connect(getTrackGain(trackId) || audioCtx.destination);
+    // A light high-pass + compressor approximates afftdn in the browser.
+    // Parameters are updated from the clip in syncAudio().
+    const hp = audioCtx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 20;
+    const comp = audioCtx.createDynamicsCompressor();
+    comp.threshold.value = 0; comp.knee.value = 30; comp.ratio.value = 1;
+    src.connect(clipGain); clipGain.connect(hp); hp.connect(comp);
+    comp.connect(getTrackGain(trackId) || audioCtx.destination);
     el._kcConnected = true;
     el._kcClipGain = clipGain;
+    el._kcHP = hp; el._kcComp = comp;
     el.muted = false;
     el.volume = 1;
   } catch (e) { /* fallback: element plays directly */ }
@@ -589,19 +598,27 @@ function selectAll() {
   syncSelectionUI(); renderInspector(); toast(`اتحدد ${state.selection.size} مقطع`);
 }
 
+function splitClipAt(track, c, at) {
+  if (!track || !c || c.type === 'transition') return null;
+  if (at <= c.start + 0.05 || at >= c.start + c.duration - 0.05) return null;
+  const firstDur = at - c.start;
+  const allKfs = sortedKfs(c);
+  const second = { ...c, id: uid(), start: Math.round(at * 100) / 100,
+    duration: Math.round((c.duration - firstDur) * 100) / 100,
+    inPoint: (c.inPoint || 0) + firstDur * (c.speed || 1),
+    keyframes: allKfs.filter((k) => k.t >= at) };
+  c.keyframes = allKfs.filter((k) => k.t < at);
+  c.duration = Math.round(firstDur * 100) / 100;
+  track.clips.push(second);
+  return second;
+}
+
 function splitSelected() {
   if (!state.selected) return;
   const c = findClip(state.selected.trackId, state.selected.clipId); if (!c) return;
   if (c.type === 'transition') { toast('لا يمكن تقسيم الانتقال'); return; }
-  const at = state.time;
-  if (at <= c.start + 0.05 || at >= c.start + c.duration - 0.05) { toast('حط رأس التشغيل جوه المقطع'); return; }
-  const firstDur = at - c.start;
-  const allKfs = sortedKfs(c);
-  const second = { ...c, id: uid(), start: Math.round(at * 100) / 100, duration: c.duration - firstDur, inPoint: (c.inPoint || 0) + firstDur * (c.speed || 1),
-    keyframes: allKfs.filter((k) => k.t >= at) };
-  c.keyframes = allKfs.filter((k) => k.t < at);
-  c.duration = Math.round(firstDur * 100) / 100;
-  getTrack(state.selected.trackId).clips.push(second);
+  const second = splitClipAt(getTrack(state.selected.trackId), c, state.time);
+  if (!second) { toast('حط رأس التشغيل جوه المقطع'); return; }
   state.selected = { trackId: state.selected.trackId, clipId: second.id };
   recomputeDuration(); renderAll(); commit('تقسيم مقطع'); toast('تم التقسيم');
 }
@@ -677,6 +694,29 @@ function fadeGainAt(c, t) {
   if (fi > 0 && local < fi) g *= clamp(local / fi, 0, 1);
   if (fo > 0 && local > dur - fo) g *= clamp((dur - local) / fo, 0, 1);
   return g;
+}
+
+// Peak-based normalization: the exact same gain is written into the clip and
+// used by FFmpeg, so preview and export agree without loudnorm's lookahead.
+function computeNormGain(c) {
+  const peaks = state.peaks.get(c.src);
+  if (!peaks || !peaks.length) return 1;
+  const from = Math.max(0, Number(c.inPoint || 0) * PEAKS_PER_SEC);
+  const span = Math.max(0.05, Number(c.duration || 1) * Number(c.speed || 1) * PEAKS_PER_SEC);
+  let max = 0;
+  for (let i = Math.floor(from); i < Math.min(peaks.length, Math.ceil(from + span)); i++) {
+    max = Math.max(max, Number(peaks[i]) || 0);
+  }
+  if (max < 0.001) return 1;
+  return Math.round(clamp(0.95 / max, 0.1, 4) * 1000) / 1000;
+}
+
+function normGainAt(c) { return c.normalize ? clamp(Number(c.normGain || 1), 0.1, 4) : 1; }
+
+function refreshNormGains(src) {
+  allClips().forEach((c) => {
+    if (clipHasAudio(c) && c.src === src && c.normalize) c.normGain = computeNormGain(c);
+  });
 }
 
 function addVolumeKeyframe(c) {
@@ -950,7 +990,7 @@ function setupTabs() {
       state.activeTab = b.dataset.tab;
       document.querySelectorAll('.tab-content').forEach((c) => c.classList.add('hidden'));
       $('tab-' + state.activeTab).classList.remove('hidden');
-      const titles = { media: 'الوسائط', audio: 'الصوت', text: 'النص', transitions: 'الانتقالات', effects: 'التأثيرات', filters: 'الفلاتر', masks: 'الماسكات', adjust: 'ضبط الصورة' };
+      const titles = { media: 'الوسائط', audio: 'الصوت', text: 'النص', transitions: 'الانتقالات', effects: 'التأثيرات', filters: 'الفلاتر', masks: 'الماسكات', adjust: 'ضبط الصورة', tools: 'الأدوات الذكية' };
       $('panelTitle').textContent = titles[state.activeTab];
       $('importBtnSide').style.display = state.activeTab === 'media' || state.activeTab === 'audio' ? 'grid' : 'none';
     });
@@ -1113,6 +1153,11 @@ function renderRuler() {
     if (s % (step * 5) === 0) tick.innerHTML = `<span>${fmtTime(s).slice(3, 8)}</span>`;
     ruler.appendChild(tick);
   }
+  (state.markers || []).forEach((m) => {
+    const tick = document.createElement('div');
+    tick.className = 'marker-tick'; tick.style.left = `${Number(m) * state.pxPerSec}px`;
+    tick.title = fmtTime(m); ruler.appendChild(tick);
+  });
 }
 
 const PEAKS_PER_SEC = 20;
@@ -1126,6 +1171,7 @@ function requestPeaks(src) {
   state.peaks.set(src, null);
   window.api?.audioPeaks?.(src).then((p) => {
     state.peaks.set(src, Array.isArray(p) ? p : []);
+    refreshNormGains(src);
     document.querySelectorAll('canvas.waveform').forEach((cv) => {
       if (cv.dataset.src === src) drawWaveform(cv);
     });
@@ -1372,6 +1418,36 @@ function startClipDrag(e, track, clip, el) {
   document.addEventListener('pointerup', up);
 }
 
+function drawCurveEditor(cv, easing) {
+  if (!cv) return;
+  const ctx = cv.getContext('2d'), w = cv.width, h = cv.height, pad = 10;
+  const iw = w - pad * 2, ih = h - pad * 2;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'var(--bg3)'; ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = '#ffffff18'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const x = pad + (iw * i) / 4, y = pad + (ih * i) / 4;
+    ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, h - pad); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+  }
+  const colors = { linear: '#8b95a7', easeIn: '#ff7a59', easeOut: '#24c6dc', easeInOut: '#ffe27a' };
+  window.KFEasing.EASINGS.forEach((e) => {
+    ctx.beginPath();
+    for (let i = 0; i <= 48; i++) {
+      const x = i / 48, y = window.KFEasing.ease(x, e);
+      const px = pad + x * iw, py = h - pad - y * ih;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.strokeStyle = colors[e] || '#fff';
+    ctx.lineWidth = e === easing ? 3 : 1.2;
+    ctx.globalAlpha = e === easing ? 1 : 0.35;
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fff'; ctx.font = '9px Cairo, sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(window.KFEasing.EASING_LABELS[easing] || easing, pad + 2, h - 2);
+}
+
 function renderMotionInspector(c) {
   const box = $('inspector');
   const cur = evalKfs(c, state.time);
@@ -1387,6 +1463,9 @@ function renderMotionInspector(c) {
     ${slider('kf_scale', 'الحجم', 0.2, 3, 0.01, cur.scale)}
     ${slider('kf_rot', 'دوران', -180, 180, 1, cur.rotation)}
     ${slider('kf_op', 'شفافية', 0, 1, 0.01, cur.opacity)}
+    <div class="section-title">منحنى الانتقال</div>
+    <canvas id="curveEditor" class="curve-editor" width="220" height="90" title="اضغط على المنحنى اللي عايزه — بيغيّر الانتقال من النقطة المختارة لللي بعدها"></canvas>
+    <div class="curve-legend">${window.KFEasing.EASINGS.map((e) => `<span data-curve="${e}">${window.KFEasing.EASING_LABELS[e]}</span>`).join('')}</div>
     <div class="section-title">النقاط المفتاحية (${(c.keyframes || []).length})</div>
     <div class="kf-list">${sortedKfs(c).map((k, i) => `<div class="kf-item">
       <span class="kf-time" data-kfgo="${i}" title="اذهب للنقطة">${fmtTime(k.t).slice(3)}</span>
@@ -1397,6 +1476,31 @@ function renderMotionInspector(c) {
     </div>`).join('') || '<div class="inspector-sub">ما فيش نقاط — اضغط «إضافة نقطة»</div>'}</div>`;
 
   $('kfAdd').addEventListener('click', () => addKeyframe(state.time));
+  const activeKf = sortedKfs(c).find((k) => k.t >= state.time - 0.02) || sortedKfs(c)[0];
+  const activeEasing = (activeKf && activeKf.easing) || 'linear';
+  const curveCv = $('curveEditor');
+  drawCurveEditor(curveCv, activeEasing);
+  const pickCurve = (easing) => {
+    const k = sortedKfs(c).find((x) => x.t >= state.time - 0.02) || sortedKfs(c)[0];
+    if (!k) { toast('ضيف نقطة مفتاحية الأول'); return; }
+    k.easing = easing; drawCurveEditor(curveCv, easing);
+    document.querySelectorAll('[data-kfeasing]').forEach((el) => {
+      if (el.closest('.kf-item')?.querySelector('.kf-time')?.textContent === fmtTime(k.t).slice(3)) el.value = easing;
+    });
+    drawPreview(); commit('منحنى كي فريم');
+  };
+  curveCv?.addEventListener('pointerdown', (e) => {
+    const r = curveCv.getBoundingClientRect();
+    const x = clamp((e.clientX - r.left) / r.width, 0, 1);
+    const y = clamp(1 - (e.clientY - r.top) / r.height, 0, 1);
+    let best = 'linear', dist = Infinity;
+    window.KFEasing.EASINGS.forEach((name) => {
+      const d = Math.abs(window.KFEasing.ease(x, name) - y);
+      if (d < dist) { dist = d; best = name; }
+    });
+    pickCurve(best);
+  });
+  document.querySelectorAll('[data-curve]').forEach((el) => el.addEventListener('click', () => pickCurve(el.dataset.curve)));
   document.querySelectorAll('[data-an]').forEach((el) => el.addEventListener('click', () => applyAnimPreset(el.dataset.an)));
   document.querySelectorAll('[data-kfgo]').forEach((el) => el.addEventListener('click', () => {
     const k = sortedKfs(c)[Number(el.dataset.kfgo)]; if (k) setTime(k.t);
@@ -1491,7 +1595,10 @@ function renderInspector() {
     <div class="field"><label>نقطة الدخول (ث)</label><input type="number" id="f_in" min="0" step="0.01" value="${c.inPoint || 0}" /></div>
     ${clipHasAudio(c) ? `<div class="field"><label>الصوت <button class="kf-mini" id="kfVol" title="كي فريم لمستوى الصوت">◇</button></label><input type="range" id="f_vol" min="0" max="2" step="0.05" value="${c.volume ?? 1}" /></div>
     <div class="field-row"><div class="field"><label>تلاشي الدخول (ث)</label><input type="number" id="f_fadein" min="0" max="${Math.round(c.duration / 2)}" step="0.05" value="${c.fadeIn || 0}" /></div>
-      <div class="field"><label>تلاشي الخروج (ث)</label><input type="number" id="f_fadeout" min="0" max="${Math.round(c.duration / 2)}" step="0.05" value="${c.fadeOut || 0}" /></div></div>` : ''}
+      <div class="field"><label>تلاشي الخروج (ث)</label><input type="number" id="f_fadeout" min="0" max="${Math.round(c.duration / 2)}" step="0.05" value="${c.fadeOut || 0}" /></div></div>
+      <div class="field-row"><label class="check-field"><input type="checkbox" id="f_normalize" ${c.normalize ? 'checked' : ''} /> تطبيع مستوى الصوت</label>
+        <label class="check-field"><input type="checkbox" id="f_denoise" ${c.denoise ? 'checked' : ''} /> تقليل الضوضاء</label></div>
+      <div class="hint mini-hint">التطبيع بيحسب جهد ثابت من قمم الصوت — المعاينة والتصدير متطابقين. تقليل الضوضاء تقريبي في المعاينة.</div>` : ''}
     <div class="section-title">السرعة والماسك</div>
     <div class="field-row"><div class="field"><label>السرعة ×</label><input type="number" id="f_speed" min="0.25" max="4" step="0.05" value="${c.speed || 1}" /></div>
       <div class="field"><label>حجم الماسك</label><input type="number" id="f_mscale" min="0.4" max="1.6" step="0.05" value="${c.maskScale || 1}" /></div></div>
@@ -1504,6 +1611,14 @@ function renderInspector() {
       <button class="mini-btn" id="inspSegClear">✕ إلغاء</button>
     </div>
     <div class="seg-status" id="segStatus">${c.segMatte ? `مفعّل: ${segModeLabel(c.segMode)}` : 'بدون عزل — اختار زرار للتشغيل'}</div>
+    <div class="seg-btns">
+      <button class="mini-btn" id="pickBg">🖼 اختيار خلفية</button>
+      <button class="mini-btn" id="clearBg">✕ إزالة الخلفية</button>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>نعومة حافة العزل (px)</label><input type="number" id="f_edge" min="0" max="12" step="0.5" value="${c.edgeFeather || 0}" /></div>
+      <label class="check-field"><input type="checkbox" id="f_smooth" ${c.matteSmooth ? 'checked' : ''} /> تنعيم زمني</label>
+    </div>
     <div class="section-title">الماسك — شكل / اتجاه / حجم / فتح وقفل</div>
     <div class="field-row">
       <div class="field"><label>الشكل <button class="kf-mini" data-mkf="maskShape" title="كي فريم للشكل">◇</button></label>
@@ -1535,6 +1650,15 @@ function renderInspector() {
     el.addEventListener('change', () => commit('تلاشي صوت'));
   });
   $('kfVol')?.addEventListener('click', () => addVolumeKeyframe(c));
+  $('f_normalize')?.addEventListener('change', (e) => {
+    c.normalize = e.target.checked;
+    if (c.normalize) { c.normGain = computeNormGain(c); if (c.normGain === 1) requestPeaks(c.src); }
+    renderAll(); commit('تطبيع الصوت');
+    toast(c.normalize ? `تطبيع ×${c.normGain}` : 'اتلغى التطبيع');
+  });
+  $('f_denoise')?.addEventListener('change', (e) => {
+    c.denoise = e.target.checked; renderAll(); commit('تقليل الضوضاء');
+  });
   const setSpeed = (v) => {
     c.speed = clamp(Number(v) || 1, 0.25, 4);
     if (c.mediaKind !== 'image') c.duration = Math.max(0.1, Math.round(((c.sourceDuration || 5) / c.speed) * 100) / 100);
@@ -1573,23 +1697,77 @@ function renderInspector() {
   if ($('inspSegGeneral')) $('inspSegGeneral').addEventListener('click', () => applySegmentation('general'));
   if ($('inspSegPerson')) $('inspSegPerson').addEventListener('click', () => applySegmentation('person'));
   if ($('inspSegClear')) $('inspSegClear').addEventListener('click', () => clearSegmentation(c));
+  if ($('pickBg')) $('pickBg').addEventListener('click', async () => {
+    const items = await window.api.openMedia(); const m = items && items[0];
+    if (!m || m.error) return;
+    c.bgSrc = m.path; c.bgKind = m.kind === 'image' ? 'image' : 'video';
+    renderAll(); commit('تغيير الخلفية'); toast('اتضافت الخلفية — العزل لازم يكون مفعّل');
+  });
+  if ($('clearBg')) $('clearBg').addEventListener('click', () => {
+    c.bgSrc = null; c.bgKind = null; renderAll(); commit('إزالة الخلفية');
+  });
+  if ($('f_edge')) $('f_edge').addEventListener('input', (e) => {
+    c.edgeFeather = clamp(Number(e.target.value) || 0, 0, 12); drawPreview(); commitSoon('نعومة الحافة');
+  });
+  if ($('f_smooth')) $('f_smooth').addEventListener('change', (e) => {
+    c.matteSmooth = e.target.checked; drawPreview(); commit('تنعيم زمني');
+  });
   document.querySelectorAll('[data-mkf]').forEach((b) => b.addEventListener('click', () => addMaskKeyframe(c, b.dataset.mkf)));
 }
 
 function refreshTimings() { recomputeDuration(); renderTracks(); renderRuler(); updatePlaybackUI(); }
 
 /* ---------- preview ---------- */
+function requestProxy(src) {
+  if (!src || state.proxies.has(src) || state.proxyPending.has(src)) return;
+  state.proxyPending.add(src);
+  window.api?.proxyFor?.(src).then((p) => {
+    if (p && p !== src) { state.proxies.set(src, p); drawPreview(); }
+  }).catch(() => {}).finally(() => state.proxyPending.delete(src));
+}
+
+function videoSourceFor(src) { return state.proxies.get(src) || src; }
+
 function getVideo(src) {
-  if (!videoEls.has(src)) {
-    const v = document.createElement('video'); v.src = toUrl(src); v.muted = true; v.playsInline = true; v.preload = 'auto';
-    setSinkOn(v); videoEls.set(src, v);
+  requestProxy(src);
+  const use = videoSourceFor(src);
+  if (!videoEls.has(use)) {
+    const v = document.createElement('video'); v.src = toUrl(use); v.muted = true; v.playsInline = true; v.preload = 'auto';
+    setSinkOn(v); videoEls.set(use, v);
   }
-  return videoEls.get(src);
+  return videoEls.get(use);
 }
 function getImage(src) {
   if (!imageEls.has(src)) { const im = new Image(); im.src = toUrl(src); imageEls.set(src, im); }
   return imageEls.get(src);
 }
+
+// Seek to the nearest real frame (proxies are all-keyframe) and redraw only
+// once the decoded frame has actually been presented.
+function seekVideo(v, target, done) {
+  const tol = Math.max(0.02, 0.5 / (state.project.fps || 30));
+  if (v.seeking || Math.abs(v.currentTime - target) <= tol) return false;
+  v.currentTime = clamp(target, 0, Math.max(0, (v.duration || target + 1) - tol));
+  if (typeof v.requestVideoFrameCallback === 'function') {
+    v.requestVideoFrameCallback(() => { if (!state.playing) done(); });
+  } else {
+    v.addEventListener('seeked', () => { if (!state.playing) done(); }, { once: true });
+  }
+  return true;
+}
+
+const frameCache = new Map();
+function cachedFrame(el, key) {
+  if (state.playing || !el || !el.videoWidth) return el;
+  if (frameCache.has(key)) return frameCache.get(key);
+  const cv = document.createElement('canvas');
+  cv.width = el.videoWidth; cv.height = el.videoHeight;
+  cv.getContext('2d').drawImage(el, 0, 0);
+  frameCache.set(key, cv);
+  if (frameCache.size > 120) frameCache.delete(frameCache.keys().next().value);
+  return cv;
+}
+function clearFrameCache() { frameCache.clear(); }
 
 function getSegMatte(c, target) {
   if (!c.segMatte) return null;
@@ -1598,12 +1776,21 @@ function getSegMatte(c, target) {
   return { source: v, time: Math.max(0, target - Number(c.segStart ?? c.inPoint ?? 0)) };
 }
 
+function getBgSource(c, target) {
+  if (!c.bgSrc) return null;
+  if (c.bgKind === 'image' || /\.(png|jpe?g|webp|bmp)$/i.test(c.bgSrc)) {
+    return { source: getImage(c.bgSrc), time: 0 };
+  }
+  const v = getVideo(c.bgSrc);
+  return { source: v, time: Math.max(0, target - Number(c.start || 0)) };
+}
+
 function getAudioNode(c) {
   if (!audioNodes.has(c.id)) {
     const el = c.mediaKind === 'video' ? getVideo(c.src) : new Audio(toUrl(c.src));
     if (c.mediaKind !== 'video') { el.preload = 'auto'; setSinkOn(el); }
     el.muted = true;
-    connectElementToAudio(el, c._track?.id);
+    connectElementToAudio(el, c._track?.id, c);
     audioNodes.set(c.id, el);
   }
   return audioNodes.get(c.id);
@@ -1627,12 +1814,18 @@ function syncAudio(t, all) {
   const anySolo = state.project.tracks.some((tr) => tr.solo);
   active.forEach((c) => {
     const el = getAudioNode(c);
-    connectElementToAudio(el, c._track?.id);
+    connectElementToAudio(el, c._track?.id, c);
     const target = (c.inPoint || 0) + (t - c.start);
     const tr = getTrack(c._track.id);
     const audible = !tr.muted && (!anySolo || tr.solo);
     const shouldHear = c.hasAudio && audible;
-    const level = clamp(volumeAt(c, t) * fadeGainAt(c, t), 0, 2);
+    const level = clamp(volumeAt(c, t) * fadeGainAt(c, t) * normGainAt(c), 0, 2);
+    if (audioCtx && el._kcHP && el._kcComp) {
+      el._kcHP.frequency.setTargetAtTime(c.denoise ? 140 : 20, audioCtx.currentTime, 0.05);
+      el._kcComp.threshold.setTargetAtTime(c.denoise ? -38 : 0, audioCtx.currentTime, 0.05);
+      el._kcComp.ratio.setTargetAtTime(c.denoise ? 6 : 1, audioCtx.currentTime, 0.05);
+      el._kcComp.knee.setTargetAtTime(c.denoise ? 6 : 30, audioCtx.currentTime, 0.05);
+    }
     if (el._kcConnected && el._kcClipGain && audioCtx) {
       el._kcClipGain.gain.setTargetAtTime(shouldHear ? level : 0, audioCtx.currentTime, 0.02);
     } else {
@@ -1695,9 +1888,27 @@ function drawTransformed(target, source, W, H, k, filter) {
   return true;
 }
 
-function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode, segSource, segInvert) {
+const matteHistory = new Map();
+function smoothedMatte(segSource, W, H) {
+  const key = segSource;
+  const raw = document.createElement('canvas'); raw.width = W; raw.height = H;
+  raw.getContext('2d').drawImage(segSource, 0, 0, W, H);
+  const out = document.createElement('canvas'); out.width = W; out.height = H;
+  const c = out.getContext('2d'); c.drawImage(raw, 0, 0);
+  const prev = matteHistory.get(key);
+  if (prev) {
+    c.globalCompositeOperation = 'lighter'; c.globalAlpha = 0.5;
+    c.drawImage(prev, 0, 0); c.drawImage(raw, 0, 0);
+    c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+  }
+  matteHistory.set(key, out);
+  return out;
+}
+
+function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode, segSource, segInvert, bgSource, edgeFeather, smooth) {
   k = { ...KF_DEFAULT, ...k };
   if (!maskKey && !segSource) { drawTransformed(ctx, source, W, H, k, filter); return; }
+  if (bgSource && segSource) drawCover(ctx, bgSource, W, H);
   fxCanvas.width = W; fxCanvas.height = H;
   fxCtx.clearRect(0, 0, W, H);
   drawTransformed(fxCtx, source, W, H, { ...k, opacity: 1 }, filter);
@@ -1725,8 +1936,9 @@ function paintSource(ctx, source, W, H, k, filter, maskKey, maskScale, maskMode,
     fxCtx.save();
     fxCtx.globalCompositeOperation = segInvert ? 'destination-out' : 'destination-in';
     fxCtx.globalAlpha = 1;
-    fxCtx.filter = 'none';
-    fxCtx.drawImage(segSource, 0, 0, W, H);
+    fxCtx.filter = Number(edgeFeather) > 0 ? `blur(${Number(edgeFeather).toFixed(1)}px)` : 'none';
+    const matte = smooth ? smoothedMatte(segSource, W, H) : segSource;
+    fxCtx.drawImage(matte, 0, 0, W, H);
     fxCtx.restore();
   }
   ctx.save(); ctx.globalAlpha = clamp(k.opacity, 0, 1); ctx.drawImage(fxCanvas, 0, 0); ctx.restore();
@@ -1778,6 +1990,9 @@ function drawPreview() {
     const shape = discreteAt(c, t, 'maskShape', c.mask);
     const mode = discreteAt(c, t, 'maskMode', c.maskMode || 'in');
     const seg = getSegMatte(c, target);
+    const bg = c.bgSrc ? getBgSource(c, target) : null;
+    const bgReady = bg && (bg.source instanceof HTMLVideoElement
+      ? bg.source.readyState >= 2 : (bg.source.complete && bg.source.naturalWidth));
     const segInvert = !shape && mode === 'out' && !!seg;
     let src = null;
     if (c.mediaKind === 'image') {
@@ -1786,18 +2001,18 @@ function drawPreview() {
     } else {
       src = getVideo(c.src);
       if (src.readyState < 2) { src.addEventListener('loadeddata', () => { if (!state.playing) drawPreview(); }, { once: true }); return; }
-      if (!state.playing && Math.abs(src.currentTime - target) > 0.12 && !src.seeking) {
-        src.currentTime = clamp(target, 0, Math.max(0, (src.duration || target + 1) - 0.05));
-        src.addEventListener('seeked', () => { if (!state.playing) drawPreview(); }, { once: true }); return;
-      }
+      if (!state.playing && seekVideo(src, target, drawPreview)) return;
     }
     if (seg && seg.source instanceof HTMLVideoElement && !state.playing &&
-        Math.abs(seg.source.currentTime - seg.time) > 0.12 && !seg.source.seeking) {
-      seg.source.currentTime = clamp(seg.time, 0, Math.max(0, (seg.source.duration || seg.time + 1) - 0.05));
-      seg.source.addEventListener('seeked', () => { if (!state.playing) drawPreview(); }, { once: true });
-      return;
-    }
-    try { paintSource(ctx, src, W, H, k, filter, shape, k.maskScale, mode, seg && seg.source, segInvert); } catch (e) { /* not ready */ }
+        seekVideo(seg.source, seg.time, drawPreview)) return;
+    if (bg && bg.source instanceof HTMLVideoElement && !state.playing &&
+        seekVideo(bg.source, bg.time, drawPreview)) return;
+    const frameKey = `${videoSourceFor(c.src || '')}|${Math.round(target * (state.project.fps || 30))}`;
+    const drawSrc = c.mediaKind === 'image' ? src : cachedFrame(src, frameKey);
+    try {
+      paintSource(ctx, drawSrc, W, H, k, filter, shape, k.maskScale, mode,
+        seg && seg.source, segInvert, bgReady ? bg.source : null, c.edgeFeather, c.matteSmooth);
+    } catch (e) { /* not ready */ }
   });
   ctx.filter = 'none';
 
@@ -1883,10 +2098,96 @@ function togglePlay() {
 }
 function stopPlayback() { state.playing = false; cancelAnimationFrame(rafId); pauseAllAudio(); $('playBtn').textContent = '▶'; setTime(0); }
 
+/* ---------- detection & transcription ---------- */
+function analysisClip() {
+  const sel = state.selected && findClip(state.selected.trackId, state.selected.clipId);
+  if (sel && sel.type === 'media' && sel.src) return sel;
+  return activeVisualClip(state.time);
+}
+
+function showDetect(lines) {
+  const box = $('detectResults'); if (!box) return;
+  box.innerHTML = lines.length ? lines.map((s) => escapeHtml(s)).join('<br>') : 'ما فيش نتائج';
+}
+
+async function detectScenesUI() {
+  const c = analysisClip(); if (!c) { toast('اختار مقطع الأول'); return; }
+  toast('⏳ جاري كشف المشاهد...');
+  try {
+    state.markers = await window.api.detectScenes(c.src, 0.4);
+    renderRuler();
+    showDetect(state.markers.map((t) => `🎬 ${fmtTime(t)}`));
+    toast(`اتلقت ${state.markers.length} قطعة`);
+  } catch (e) { toast('فشل الكشف: ' + (e.message || e)); }
+}
+
+function splitScenesUI() {
+  const c = analysisClip(); if (!c || !state.markers.length) { toast('اعمل كشف مشاهد الأول'); return; }
+  const track = getTrack(c._track?.id || state.selected?.trackId); if (!track) return;
+  const marks = state.markers.filter((t) => t > c.start + 0.05 && t < c.start + c.duration - 0.05)
+    .sort((a, b) => b - a);
+  marks.forEach((t) => splitClipAt(track, findClip(track.id, c.id), t));
+  recomputeDuration(); renderAll(); commit('تقسيم عند المشاهد'); toast(`اتقسّم ${marks.length} مرة`);
+}
+
+async function detectSilenceUI() {
+  const c = analysisClip(); if (!c) { toast('اختار مقطع الأول'); return; }
+  toast('⏳ جاري كشف الصمت...');
+  try {
+    state.silences = await window.api.detectSilence(c.src, '-35dB', 0.4);
+    showDetect(state.silences.map((s) => `🔇 ${fmtTime(s.start)} → ${fmtTime(s.end)}`));
+    toast(`اتلقت ${state.silences.length} فترات صمت`);
+  } catch (e) { toast('فشل الكشف: ' + (e.message || e)); }
+}
+
+function removeSilenceUI() {
+  const c = analysisClip(); if (!c || !state.silences.length) { toast('اعمل كشف صمت الأول'); return; }
+  const track = getTrack(c._track?.id || state.selected?.trackId); if (!track) return;
+  const ranges = state.silences.filter((s) => s.start < c.start + c.duration && s.end > c.start);
+  const cuts = [];
+  ranges.forEach((s) => {
+    cuts.push(clamp(s.start, c.start + 0.02, c.start + c.duration - 0.02));
+    cuts.push(clamp(s.end, c.start + 0.02, c.start + c.duration - 0.02));
+  });
+  const pieces = [findClip(track.id, c.id)].filter(Boolean);
+  [...new Set(cuts.map((t) => Math.round(t * 100) / 100))].sort((a, b) => b - a).forEach((t) => {
+    const piece = pieces.find((p) => t > p.start + 0.02 && t < p.start + p.duration - 0.02);
+    if (piece) { const second = splitClipAt(track, piece, t); if (second) pieces.push(second); }
+  });
+  let removed = 0;
+  pieces.forEach((p) => {
+    if (ranges.some((s) => p.start >= s.start - 0.03 && p.start + p.duration <= s.end + 0.03)) {
+      track.clips = track.clips.filter((x) => x.id !== p.id); removed++;
+    }
+  });
+  clearSelection(); recomputeDuration(); renderAll(); commit('حذف الصمت'); toast(`اتحذف ${removed} جزء صمت`);
+}
+
+async function transcribeUI() {
+  const c = analysisClip(); if (!c) { toast('اختار مقطع الأول'); return; }
+  toast('⏳ جاري استخراج النص العربي...');
+  try {
+    const segs = await window.api.transcribe(c.src);
+    if (!segs || !segs.length) { toast('مفيش كلام واضح في المقطع'); return; }
+    let added = 0;
+    segs.forEach((s) => {
+      const at = Math.max(0, c.start + Number(s.start || 0));
+      const clip = addTextClip({ name: 'ترجمة', text: s.text, duration: Math.max(0.4, Number(s.end) - Number(s.start)), fontSize: 48, x: 0.5, y: 0.86 }, at);
+      if (clip) added++;
+    });
+    showDetect(segs.map((s) => `${fmtTime(s.start)}  ${s.text}`));
+    toast(`اتضافت ${added} ترجمة`);
+  } catch (e) { toast('فشل الاستخراج: ' + (e.message || e)); }
+}
+
 /* ---------- events ---------- */
 async function importMedia() {
   const items = await window.api.openMedia(); if (!items || !items.length) return;
-  items.forEach((m) => { if (m.error) return; m.sourceDuration = m.duration; state.media.push(m); });
+  items.forEach((m) => {
+    if (m.error) return;
+    m.sourceDuration = m.duration; state.media.push(m);
+    if (m.kind === 'video') requestProxy(m.path);
+  });
   renderMedia(); renderAudioMedia(); toast(`تم استيراد ${items.length} ملف`);
 }
 $('importBtn').addEventListener('click', importMedia);
@@ -1896,6 +2197,18 @@ $('playBtn').addEventListener('click', togglePlay);
 $('stopBtn').addEventListener('click', stopPlayback);
 $('deleteBtn').addEventListener('click', deleteSelected);
 $('splitBtn').addEventListener('click', splitSelected);
+$('detectScenesBtn').addEventListener('click', detectScenesUI);
+$('splitScenesBtn').addEventListener('click', splitScenesUI);
+$('detectSilenceBtn').addEventListener('click', detectSilenceUI);
+$('removeSilenceBtn').addEventListener('click', removeSilenceUI);
+$('transcribeBtn').addEventListener('click', transcribeUI);
+$('copyReportBtn').addEventListener('click', async () => {
+  try {
+    const report = await window.api.getReport();
+    await navigator.clipboard.writeText(report || 'ما فيش أخطاء مسجّلة');
+    toast('اتنسخ تقرير الأخطاء');
+  } catch (e) { toast('ما قدرتش أنسخ التقرير'); }
+});
 
 $('masterVol').addEventListener('input', (e) => { masterVolume = Number(e.target.value); ensureAudioGraph(); updateTrackGains(); });
 $('muteBtn').addEventListener('click', () => {
@@ -2034,6 +2347,13 @@ $('progressCancelBtn').addEventListener('click', async () => {
   else if (activeExportId) await window.api.cancelExport(activeExportId);
 });
 
+window.addEventListener('error', (e) => {
+  window.api?.logError?.('window.error', `${e.message} @ ${e.filename}:${e.lineno}`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  window.api?.logError?.('unhandledrejection', e.reason && (e.reason.stack || e.reason.message) || e.reason);
+});
+
 window.api.onProgress((p) => {
   if (p.id) activeExportId = p.id;
   if (p.cancelled) return;
@@ -2091,3 +2411,7 @@ setupTabs(); renderPresets(); recomputeDuration(); renderAll();
 window.KCHistory.reset(state.project, 'بداية');
 syncAdjustInputs(); updateHistoryUI();
 populateAudioDevices(); drawVuLoop();
+window.api?.runtime?.().then((r) => {
+  const el = $('runtimeStatus');
+  if (el && r) el.textContent = `${r.packaged ? 'نسخة مثبّتة' : 'نسخة تطوير'} · FFmpeg ${r.ffmpegReady ? 'جاهز' : 'مش موجود'} · ${r.appDir}`;
+}).catch(() => {});

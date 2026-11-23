@@ -1,12 +1,38 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs, extractAudioPeaks } = require('./ffmpeg-builder');
+const { APP_DIR, FFMPEG, TEMP_DIR, probeFile, grabFrame, reverseClip, segmentMatte, buildFfmpegArgs, extractAudioPeaks, makeProxy,
+  detectScenes, detectSilence, transcribeAudio } = require('./ffmpeg-builder');
 const { normalizeProject, denormalizeProject } = require('./project-paths');
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.setName('Kon Cut');
+
+/* ---------- local error log (no telemetry) ---------- */
+function logPath() { return path.join(app.getPath('logs'), 'kon-cut.log'); }
+function logError(scope, message) {
+  try {
+    const dir = path.dirname(logPath());
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(logPath(), `[${new Date().toISOString()}] ${scope}: ${String(message).slice(0, 2000)}\n`);
+  } catch (e) { /* logging must never break the app */ }
+}
+process.on('uncaughtException', (e) => logError('uncaughtException', e && e.stack || e));
+process.on('unhandledRejection', (e) => logError('unhandledRejection', e && e.stack || e));
+ipcMain.handle('log:error', (_, scope, message) => logError(scope || 'renderer', message));
+ipcMain.handle('log:report', () => {
+  try { return fs.existsSync(logPath()) ? fs.readFileSync(logPath(), 'utf8').slice(-20000) : ''; }
+  catch (e) { return ''; }
+});
+ipcMain.handle('app:runtime', () => ({
+  ffmpeg: FFMPEG,
+  ffmpegReady: fs.existsSync(FFMPEG),
+  appDir: APP_DIR,
+  models: path.join(APP_DIR, 'runtime', 'models'),
+  packaged: !!app.isPackaged,
+}));
 
 let mainWindow = null;
 let currentProjectPath = null;
@@ -181,6 +207,39 @@ ipcMain.handle('export:cancel', async (_, id) => {
   cancelled.add(id);
   killProcesses(running.exports.get(id));
   return true;
+});
+
+const proxyCache = new Map();
+ipcMain.handle('proxy:get', async (_, src) => {
+  const abs = resolveAsset(src);
+  if (!abs || !fs.existsSync(abs) || !/\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(abs)) return null;
+  if (proxyCache.has(abs)) return proxyCache.get(abs);
+  try {
+    const stat = fs.statSync(abs);
+    const key = crypto.createHash('md5').update(abs + '|' + stat.size + '|' + stat.mtimeMs).digest('hex').slice(0, 16);
+    const dir = path.join(TEMP_DIR, 'proxies');
+    fs.mkdirSync(dir, { recursive: true });
+    const out = path.join(dir, `proxy_${key}.mp4`);
+    if (!fs.existsSync(out)) await makeProxy(abs, out);
+    proxyCache.set(abs, out);
+    return out;
+  } catch (e) { return null; }
+});
+
+ipcMain.handle('detect:scenes', async (_, src, threshold) => {
+  const abs = resolveAsset(src);
+  if (!abs || !fs.existsSync(abs)) return [];
+  try { return await detectScenes(abs, threshold); } catch (e) { throw new Error(e.message || e); }
+});
+ipcMain.handle('detect:silence', async (_, src, noise, minDur) => {
+  const abs = resolveAsset(src);
+  if (!abs || !fs.existsSync(abs)) return [];
+  try { return await detectSilence(abs, noise, minDur); } catch (e) { throw new Error(e.message || e); }
+});
+ipcMain.handle('captions:generate', async (_, src) => {
+  const abs = resolveAsset(src);
+  if (!abs || !fs.existsSync(abs)) throw new Error('الملف مش موجود');
+  return transcribeAudio(abs);
 });
 
 const peakCache = new Map();

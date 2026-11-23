@@ -209,6 +209,15 @@ kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
 .kf-time { cursor: pointer; color: var(--dim); min-width: 38px; }
 .kf-time:hover { color: var(--accent); }
 .kf-easing { flex: 1; min-width: 0; background: var(--bg2); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 2px; font-size: 9px; }
+.curve-editor { width: 100%; height: 90px; border: 1px solid var(--line); border-radius: 6px; cursor: crosshair; background: var(--bg3); }
+.curve-legend { display: flex; gap: 8px; flex-wrap: wrap; font-size: 8px; color: var(--dim); margin: 4px 0 2px; }
+.curve-legend span { cursor: pointer; }
+.curve-legend span:hover { color: var(--accent); }
+.check-field { flex-direction: row; align-items: center; gap: 4px; font-size: 9px; white-space: nowrap; }
+.check-field input { accent-color: var(--accent); }
+.mini-hint { font-size: 8px !important; line-height: 1.5; }
+.detect-results { font-size: 9px; color: var(--dim); line-height: 1.7; max-height: 120px; overflow: auto; background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; padding: 6px; margin-bottom: 8px; }
+.marker-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #ffe27a99; z-index: 2; pointer-events: none; }
 .kf-mini { background: transparent; border: 1px solid var(--line); color: #ffe27a; border-radius: 4px; font-size: 9px; padding: 0 3px; margin: 0 3px; cursor: pointer; }
 .kf-mini:hover { background: #4a3d14; }
 .mask-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }

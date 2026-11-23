@@ -49,6 +49,14 @@ npm start
 - **تحكم في المسارات**: قفل/فتح المسار (🔒)، تحريكه لأعلى/أسفل (▲/▼)، وكمان الإجراءات دول في قائمة الكليك الأيمن.
 - **إعدادات تصدير controllable**: دقة (أفقي/عمودي/مربع)، معدل إطارات (24–60)، وجودة (CRF 18/23/28) قبل بدء التصدير.
 - **إلغاء العمليات**: زر «إلغاء العملية» بيوقف التصدير أو العزل الذكي في نص الطريق، مع إغلاق كل عمليات FFmpeg/Python التابعة.
+- **تطبيع الصوت وتقليل الضوضاء**: تطبيع بقمم الصوت (نفس الجهد في المعاينة والتصدير)، و`afftdn` في التصدير مع تقريب عبر Web Audio في المعاينة.
+- **Curve editor مصغّر**: منحنيات linear / easeIn / easeOut / easeInOut مرسومة على لوحة الحركة، والضغط على المنحنى بيغيّر الانتقال للنقطة المختارة.
+- **Proxies تلقائية**: نسخ 480p بكل الإطارات keyframes للمعاينة السريعة، والتصدير دايماً من الملف الأصلي. الـ seek بيستنى أول إطار فعلي عبر `requestVideoFrameCallback`، مع cache محدود للإطارات.
+- **تبديل الخلفية بعد العزل**: اختار صورة أو فيديو كخلفية، مع نعومة حافة (feather) وتنعيم زمني للـ matte (`tmix`) — شغالين في المعاينة والتصدير.
+- **أدوات ذكية**: كشف تغيّر المشاهد (`select=gt(scene,0.4)`) مع علامات على المسطرة وتقسيم تلقائي، وكشف الصمت (`silencedetect`) مع حذف وتعويض (ripple).
+- **ترجمة عربية محلية**: استخراج نص من المقطع المحدد عبر Whisper small int8 محزّم، وتحويله لتقطيعات نص على مسار النصوص — من غير إنترنت.
+- **تقارير أخطاء محلية**: لوج في `%LOCALAPPDATA%\Kon Cut\logs\kon-cut.log` وزر «نسخ تقرير الأخطاء» — مفيش أي إرسال خارجي.
+- **تغليف جاهز**: installer NSIS + نسخة portable، مع FFmpeg وPython وONNX models وWhisper جوه الحزمة.
 - نصوص عربية (Cairo) + حفظ/فتح `.montaj` + تصدير MP4 (H.264 + AAC) بشريط تقدم.
 
 ## من أين جات الأفكار (بحث مرتّب بالـ GitHub stars)
@@ -68,21 +76,27 @@ npm start
 
 ## اللي لسه مخطط له
 
-Curve editor متقدم، كشف الصمت/المشاهد، Chroma key، تثبيت صوت، ترجمة تلقائية محلية، Lottie، وتغليف `.exe`.
+Chroma key، تثبيت صوت متقدم، Lottie، وتحرير متعدد الطبقات أعمق. الباقي من خطة المرحلة 3 اتلغى كله واتنفّذ.
 
 ## ملاحظات تقنية
 
-- FFmpeg و ffprobe موجودان في `C:\Users\Elmodather\AppData\Local\Programs\FFmpeg\...`، أو ضعهم في `bin\` أو استخدم المتغير `KONCUT_FFMPEG`.
-- العزل الذكي يحتاج Python 3.12 مع `rembg[cpu]` و`pymatting`:
+- FFmpeg و ffprobe بيتقراو من `bin\` أولاً. لو مش موجودين فحطهم في `bin\` أو ضع المتغير `KONCUT_FFMPEG_DIR` (مجلد bin). المتغير `KONCUT_FFMPEG` لسه بيشتغل كـ override مباشر.
+- العزل الذكي والترجمة بيستخدموا Python محزّم في `runtime\python` (أو `KONCUT_PYTHON`). النماذج في `runtime\models`: `isnet-general-use` و`u2net_human_seg` و`u2netp` للعزل، و`whisper/small` للترجمة. سكربت `tools\remove_bg.py` بيقرأ raw RGB من FFmpeg وبيكتب matte رمادي.
+- لتجهيز مجلد `runtime` و`bin` من الصفر:
   ```bat
-  C:\Users\Elmodather\AppData\Local\Programs\Python\Python312\python.exe -m pip install "rembg[cpu]" pymatting
+  npm run prepare:runtime
   ```
-  أو حط مسار Python في المتغير `KONCUT_PYTHON`. أول تشغيل بينزّل نماذج `isnet-general-use` و`u2net_human_seg` في `%USERPROFILE%\.rembg\models` (~350MB). سكربت التوليد في `tools\remove_bg.py` بيقرأ raw RGB من FFmpeg وبيكتب matte رمادي.
+  السكربت بينزّل Python embeddable و`rembg[cpu]` و`pymatting` و`faster-whisper` والنماذج، وبينسخ FFmpeg من `KONCUT_FFMPEG_DIR`.
+- بناء Installer + Portable:
+  ```bat
+  npm run dist:full
+  ```
+  الناتج في `dist\`. GitHub Actions بيعمل نفس الخطوات في `.github\workflows\build.yml` عند دفع tag `v*`.
 - الخطوط في `assets\fonts`، المؤثرات في `assets\sfx`، الماسكات في `assets\masks`.
 - منطق FFmpeg في `ffmpeg-builder.js` منفصل عن Electron عشان يتختبر لوحده. الاختبارات المتاحة:
   ```bat
   npm run test:all
   ```
-  بتشغّل `test-history.js` و`test-project-paths.js` و`test-export-filters.js` و`test-audio.js` و`test-export.js` و`test-segment.js`.
+  بتشغّل كل اختبارات الوحدة (history / paths / filters / audio / export / segment / AI) وبعدين `test-ui.mjs` — اختبار CDP لواجهة Electron على profile منفصل.
 - الأصول المولّدة (إطار مجمد، مقطع معكوس، matte عزل) بتتنقل تلقائياً لمجلد `<اسم المشروع>_assets` جنب ملف `.montaj`، والمسارات بتتخزّن نسبية عشان المشروع يفتح على أي جهاز.
 - المشروع على GitHub باسم **Kon Cut** (المستودع: `kon-cut`).

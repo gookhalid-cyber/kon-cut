@@ -11,9 +11,71 @@
     "test:filters": "node test-export-filters.js",
     "test:paths": "node test-project-paths.js",
     "test:audio": "node test-audio.js",
-    "test:all": "node test-history.js && node test-project-paths.js && node test-export-filters.js && node test-audio.js && node test-export.js && node test-segment.js"
+    "test:ui": "node test-ui.mjs",
+    "test:ai": "node test-ai.js",
+    "test:all": "node test-history.js && node test-project-paths.js && node test-export-filters.js && node test-audio.js && node test-export.js && node test-segment.js && node test-ai.js && node test-ui.mjs",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
+    "dist": "electron-builder --win",
+    "dist:full": "npm run prepare:runtime && npm run dist"
   },
   "devDependencies": {
-    "electron": "^40.0.0"
+    "electron": "^40.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.koncut.studio",
+    "productName": "Kon Cut",
+    "asar": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!temp/**",
+      "!dist/**",
+      "!test-*.js",
+      "!test-*.mjs",
+      "!scripts/**"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

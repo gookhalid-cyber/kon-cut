@@ -1,6 +1,10 @@
 node_modules/
 temp/
 dist/
+bin/*
+!bin/.gitkeep
+runtime/*
+!runtime/.gitkeep
 __pycache__/
 *.pyc
 *.log

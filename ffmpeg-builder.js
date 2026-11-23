@@ -6,35 +6,45 @@ const { execFileSync, spawn } = require('child_process');
 const { kfExpression } = require('./kf-easing');
 
 const APP_DIR = __dirname;
+// Packaged builds place big binaries in resources/ next to app.asar/app.
+// Dev builds just use the project folder. The first existing path wins.
+const RESOURCE_ROOT = process.env.KONCUT_RESOURCES || process.resourcesPath;
+function resource(...parts) {
+  if (RESOURCE_ROOT) {
+    const p = path.join(RESOURCE_ROOT, ...parts);
+    if (fs.existsSync(p)) return p;
+  }
+  return path.join(APP_DIR, ...parts);
+}
 function resolveBin(name) {
-  const local = path.join(APP_DIR, 'bin', name + '.exe');
+  const local = resource('bin', name + (process.platform === 'win32' ? '.exe' : ''));
   if (fs.existsSync(local)) return local;
   const envPath = process.env['KONCUT_' + name.toUpperCase()];
   if (envPath && fs.existsSync(envPath)) return envPath;
-  return 'C:\\Users\\Elmodather\\AppData\\Local\\Programs\\FFmpeg\\ffmpeg-9.0.2-essentials_build\\bin\\' + name + '.exe';
+  return name; // final fallback: PATH (packaged builds always ship bin/)
 }
 const FFMPEG = resolveBin('ffmpeg');
 const FFPROBE = resolveBin('ffprobe');
 const TEMP_DIR = path.join(APP_DIR, 'temp');
 
-function resolvePython() {
+function resolvePython(modules = 'rembg,PIL') {
   const candidates = [
     process.env.KONCUT_PYTHON,
+    resource('runtime', 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3'),
     path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'python.exe'),
     path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python311', 'python.exe'),
-    'python',
+    'python3', 'python',
   ].filter(Boolean);
   for (const p of candidates) {
     try {
-      if (p === 'python' || fs.existsSync(p)) {
-        execFileSync(p, ['-c', 'import rembg,PIL'], { stdio: 'ignore', timeout: 20000 });
-        return p;
-      }
+      if (p !== 'python' && p !== 'python3' && !fs.existsSync(p)) continue;
+      execFileSync(p, ['-c', `import ${modules}`], { stdio: 'ignore', timeout: 25000 });
+      return p;
     } catch (e) { /* try next */ }
   }
-  throw new Error('Python + rembg غير مثبّتين');
+  throw new Error(`Python غير متوفر أو المكتبات المطلوبة غير مثبّتة: ${modules}`);
 }
-const REMBG_SCRIPT = path.join(APP_DIR, 'tools', 'remove_bg.py');
+const REMBG_SCRIPT = resource('tools', 'remove_bg.py');
 
 function makeThumb(filePath, kind) {
   if (kind === 'image') return filePath;
@@ -178,7 +188,7 @@ const MASK_KEYS = ['circle', 'rectangle', 'heart', 'star', 'triangle', 'diamond'
 function clampNum(v, a, b) { return Math.max(a, Math.min(b, Number(v) || 0)); }
 
 function maskPathFor(key) {
-  return MASK_KEYS.includes(key) ? path.join(APP_DIR, 'assets', 'masks', key + '.png') : null;
+  return MASK_KEYS.includes(key) ? resource('assets', 'masks', key + '.png') : null;
 }
 
 function maskSegments(c) {
@@ -281,6 +291,15 @@ function buildFfmpegArgs(project, outputPath) {
     });
     maskPlans.set(c.id, segs);
   });
+  mediaClips.forEach((c) => {
+    if (!c.bgSrc) return;
+    const p = path.isAbsolute(c.bgSrc) ? c.bgSrc : path.resolve(APP_DIR, c.bgSrc);
+    if (!fs.existsSync(p)) return;
+    if (c.bgKind === 'image' || /\.(png|jpe?g|webp|bmp)$/i.test(p)) inputArgs.push('-loop', '1', '-framerate', String(fps));
+    else inputArgs.push('-stream_loop', '-1');
+    inputArgs.push('-i', p);
+    c._bgInput = inputIdx++;
+  });
 
   const filters = [`color=c=black:s=${W}x${H}:r=${fps}:d=${duration.toFixed(3)}[base]`];
   let lastV = 'base';
@@ -317,10 +336,12 @@ function buildFfmpegArgs(project, outputPath) {
         if (hasSeg) {
           const segStart = Number(c.segStart ?? c.inPoint ?? 0);
           const matteOffset = Math.max(0, (inP - segStart) / speed);
-          const matteChain =
+          let matteChain =
             `[${c._segInput}:v]setpts=(PTS-STARTPTS)/${speed.toFixed(3)},` +
             `trim=start=${matteOffset.toFixed(3)}:end=${(matteOffset + dur).toFixed(3)},setpts=PTS-STARTPTS,` +
             `scale=${W}:${H},format=gray`;
+          if (c.matteSmooth) matteChain += ',tmix=frames=3:weights=1 1 1';
+          if (Number(c.edgeFeather) > 0) matteChain += `,gblur=sigma=${Number(c.edgeFeather).toFixed(2)}`;
           if (segs.length > 1) {
             filters.push(`${matteChain},split=${segs.length}[${segs.map((_, i) => `msp${n}_${i}`).join('][')}]`);
           } else {
@@ -370,10 +391,19 @@ function buildFfmpegArgs(project, outputPath) {
         finalLabel = maskBase;
       }
       const out = `vo${n}`;
-      filters.push(
-        `[${lastV}][${finalLabel}]overlay=0:0:enable='between(t,${Number(c.start || 0).toFixed(3)},` +
-        `${(Number(c.start || 0) + dur).toFixed(3)})'[${out}]`
-      );
+      const win = `between(t,${Number(c.start || 0).toFixed(3)},${(Number(c.start || 0) + dur).toFixed(3)})`;
+      if (c._bgInput != null) {
+        const bg = `bgsrc${n}`, comp = `bgcomp${n}`;
+        filters.push(
+          `[${c._bgInput}:v]trim=end=${dur.toFixed(3)},setpts=PTS-STARTPTS,` +
+          `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[${bg}]`
+        );
+        // finalLabel already carries the segmentation/mask alpha.
+        filters.push(`[${bg}][${finalLabel}]overlay=0:0[${comp}]`);
+        filters.push(`[${lastV}][${comp}]overlay=0:0:enable='${win}'[${out}]`);
+      } else {
+        filters.push(`[${lastV}][${finalLabel}]overlay=0:0:enable='${win}'[${out}]`);
+      }
       lastV = out;
     });
 
@@ -417,6 +447,9 @@ function buildFfmpegArgs(project, outputPath) {
         'asetpts=PTS-STARTPTS',
         atempoFor(speed),
       ];
+      if (c.denoise) chain.push('afftdn=nf=-25');
+      const norm = c.normalize ? clampNum(c.normGain || 1, 0.1, 4) : 1;
+      if (Math.abs(norm - 1) > 0.001) chain.push(`volume=${norm.toFixed(3)}`);
       const fi = clampNum(c.fadeIn || 0, 0, Number(c.duration || 1) / 2);
       const fo = clampNum(c.fadeOut || 0, 0, Number(c.duration || 1) / 2);
       if (fi > 0.001) chain.push(`afade=t=in:st=0:d=${fi.toFixed(3)}`);
@@ -444,6 +477,98 @@ function buildFfmpegArgs(project, outputPath) {
     outputPath
   );
   return args;
+}
+
+// Analyse the source with FFmpeg filters and return timeline positions in seconds.
+function detectScenes(src, threshold = 0.4) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG, [
+      '-hide_banner', '-nostats', '-i', src,
+      '-vf', `select='gt(scene,${Number(threshold) || 0.4})',showinfo`,
+      '-an', '-f', 'null', '-',
+    ], { cwd: APP_DIR, windowsHide: true });
+    let err = '';
+    proc.stderr.on('data', (b) => { err += b.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`scene detect (${code}): ${err.slice(-800)}`));
+      const times = [...err.matchAll(/pts_time:([0-9.]+)/g)].map((m) => Math.round(Number(m[1]) * 100) / 100);
+      resolve([...new Set(times)].filter((t) => t > 0.05));
+    });
+  });
+}
+
+function detectSilence(src, noise = '-35dB', minDur = 0.4) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG, [
+      '-hide_banner', '-nostats', '-i', src,
+      '-af', `silencedetect=noise=${noise}:d=${Number(minDur) || 0.4}`,
+      '-f', 'null', '-',
+    ], { cwd: APP_DIR, windowsHide: true });
+    let err = '';
+    proc.stderr.on('data', (b) => { err += b.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`silence detect (${code}): ${err.slice(-800)}`));
+      const out = [];
+      let start = null;
+      for (const line of err.split(/\r?\n/)) {
+        let m = line.match(/silence_start:\s*([0-9.]+)/);
+        if (m) { start = Number(m[1]); continue; }
+        m = line.match(/silence_end:\s*([0-9.]+)/);
+        if (m && start != null) {
+          out.push({ start: Math.round(start * 100) / 100, end: Math.round(Number(m[1]) * 100) / 100 });
+          start = null;
+        }
+      }
+      resolve(out);
+    });
+  });
+}
+
+// Local Arabic transcription. The model lives in runtime/models/whisper when bundled.
+function transcribeAudio(src) {
+  if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+  const wav = path.join(TEMP_DIR, 'caption_' + crypto.createHash('md5').update(src).digest('hex').slice(0, 12) + '.wav');
+  execFileSync(FFMPEG, [
+    '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+    '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav,
+  ], { cwd: APP_DIR, windowsHide: true });
+  const python = resolvePython('faster_whisper');
+  const modelsDir = process.env.KONCUT_MODELS_DIR || resource('runtime', 'models', 'whisper');
+  return new Promise((resolve, reject) => {
+    const proc = spawn(python, ['-u', resource('tools', 'transcribe.py'), wav,
+      '--model', process.env.KONCUT_WHISPER_MODEL || 'small'], {
+      cwd: APP_DIR, windowsHide: true,
+      env: { ...process.env, KONCUT_MODELS_DIR: modelsDir },
+    });
+    let out = '', err = '';
+    proc.stdout.on('data', (b) => { out += b.toString(); });
+    proc.stderr.on('data', (b) => { err = (err + b.toString()).slice(-3000); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`transcribe (${code}): ${err}`));
+      try { resolve(JSON.parse(out.trim())); }
+      catch (e) { reject(new Error('transcribe output: ' + out.slice(0, 300))); }
+    });
+  });
+}
+
+// Low-resolution, all-keyframe preview copy. Audio is kept so a single
+// <video> element can still drive both the picture and the sound.
+function makeProxy(src, out, width = 480) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG, [
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+      '-vf', `scale=${width}:-2`,
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-g', '1', '-keyint_min', '1',
+      '-c:a', 'aac', '-b:a', '64k', '-movflags', '+faststart', out,
+    ], { cwd: APP_DIR, windowsHide: true });
+    let err = '';
+    proc.stderr.on('data', (b) => { err = (err + b.toString()).slice(-2000); });
+    proc.on('error', reject);
+    proc.on('close', (code) => code === 0 ? resolve(out) : reject(new Error(`proxy (${code}): ${err}`)));
+  });
 }
 
 // Decode audio to 8 kHz mono PCM and reduce it to one 0..1 peak per bucket.
@@ -575,5 +700,6 @@ async function segmentMatte(opts) {
 
 module.exports = {
   APP_DIR, FFMPEG, FFPROBE, TEMP_DIR, probeFile, makeThumb,
-  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs, colorGradeFilter, extractAudioPeaks,
+  grabFrame, reverseClip, segmentMatte, buildAss, buildFfmpegArgs, colorGradeFilter, extractAudioPeaks, makeProxy,
+  detectScenes, detectSilence, transcribeAudio,
 };

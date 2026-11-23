@@ -25,6 +25,8 @@ function normalizeProject(data, projectPath, tempDir) {
   (copy.tracks || []).forEach((t) => (t.clips || []).forEach((c) => {
     c.src = localize(c.src);
     c.segMatte = localize(c.segMatte);
+    c.bgSrc = localize(c.bgSrc);
+    delete c.proxySrc; // proxies are regenerable temp files, never project assets
   }));
   return copy;
 }
@@ -37,6 +39,7 @@ function denormalizeProject(data, projectPath) {
   (copy.tracks || []).forEach((t) => (t.clips || []).forEach((c) => {
     c.src = resolve(c.src);
     c.segMatte = resolve(c.segMatte);
+    c.bgSrc = resolve(c.bgSrc);
   }));
   return copy;
 }

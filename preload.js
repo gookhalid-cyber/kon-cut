@@ -17,6 +17,13 @@ contextBridge.exposeInMainWorld('api', {
   reverseClip: (src, start, duration, hasAudio) => ipcRenderer.invoke('clip:reverse', src, start, duration, hasAudio),
   segmentClip: (opts) => ipcRenderer.invoke('clip:segment', opts),
   audioPeaks: (src) => ipcRenderer.invoke('audio:peaks', src),
+  proxyFor: (src) => ipcRenderer.invoke('proxy:get', src),
+  detectScenes: (src, threshold) => ipcRenderer.invoke('detect:scenes', src, threshold),
+  detectSilence: (src, noise, minDur) => ipcRenderer.invoke('detect:silence', src, noise, minDur),
+  transcribe: (src) => ipcRenderer.invoke('captions:generate', src),
+  logError: (scope, message) => ipcRenderer.invoke('log:error', scope, message),
+  getReport: () => ipcRenderer.invoke('log:report'),
+  runtime: () => ipcRenderer.invoke('app:runtime'),
   onProgress: (cb) => ipcRenderer.on('export:progress', (_, p) => cb(p)),
   onSegmentProgress: (cb) => ipcRenderer.on('segment:progress', (_, p) => cb(p)),
 });
